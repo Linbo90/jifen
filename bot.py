@@ -1,5 +1,4 @@
 import asyncio
-import sqlite3
 import re
 import os
 from datetime import datetime, timedelta
@@ -12,10 +11,13 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+import psycopg2
+from psycopg2.extras import DictCursor
 
 # ===================== 环境变量配置（Railway后台设置，无需改代码）=====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 INIT_ADMIN_USERNAME = os.getenv("INIT_ADMIN_USERNAME", "lmdoi")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 TZ = timezone(os.getenv("TZ", "Asia/Shanghai"))
 # 规则配置（也可在Railway环境变量自定义）
 VALID_MESSAGE_MIN_LENGTH = int(os.getenv("VALID_MESSAGE_MIN_LENGTH", 5))
@@ -25,23 +27,17 @@ DAILY_BONUS_POINTS = int(os.getenv("DAILY_BONUS_POINTS", 288))
 WEEKLY_SPEECH_TARGET = int(os.getenv("WEEKLY_SPEECH_TARGET", 2888))
 WEEKLY_BONUS_POINTS = int(os.getenv("WEEKLY_BONUS_POINTS", 1688))
 RANK_SHOW_LIMIT = int(os.getenv("RANK_SHOW_LIMIT", 10))
-# 数据库持久化路径（Railway Volume挂载目录，请勿修改）
-DB_DIR = "/app/data"
-DB_PATH = os.path.join(DB_DIR, "group_bot.db")
 # ========================================================================================
-
-# 确保数据目录存在（避免容器启动报错）
-os.makedirs(DB_DIR, exist_ok=True)
 
 # 数据库初始化
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     # 用户表：存储用户信息、积分、权限
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             username TEXT,
             full_name TEXT,
             points INTEGER DEFAULT 0,
@@ -52,9 +48,9 @@ def init_db():
     # 发言统计表：记录所有有效发言，用于周期统计
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS message_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            chat_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            chat_id BIGINT,
             message_time TIMESTAMP,
             is_valid INTEGER DEFAULT 1,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
@@ -64,8 +60,8 @@ def init_db():
     # 签到记录表：防止重复签到
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS check_in (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             check_in_date DATE,
             UNIQUE(user_id, check_in_date),
             FOREIGN KEY (user_id) REFERENCES users(user_id)
@@ -75,8 +71,8 @@ def init_db():
     # 奖励发放记录表：防止重复发放周期奖励
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS bonus_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             bonus_type TEXT,
             period TEXT,
             UNIQUE(user_id, bonus_type, period),
@@ -100,7 +96,10 @@ def get_time_range(period: str):
         end = start + timedelta(days=6, hours=23, minutes=59, seconds=59)
     elif period == "month":
         start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        next_month = start.replace(month=start.month%12 + 1, day=1)
+        if start.month == 12:
+            next_month = start.replace(year=start.year+1, month=1, day=1)
+        else:
+            next_month = start.replace(month=start.month+1, day=1)
         end = next_month - timedelta(seconds=1)
     return start, end
 
@@ -119,23 +118,23 @@ def is_valid_message(message) -> bool:
 
 # 更新/新增用户信息到数据库
 def update_user_info(user):
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, has_permission FROM users WHERE user_id = ?", (user.id,))
+    cursor.execute("SELECT user_id, has_permission FROM users WHERE user_id = %s", (user.id,))
     result = cursor.fetchone()
 
     if not result:
         is_admin = 1 if user.username and user.username.lower() == INIT_ADMIN_USERNAME.lower() else 0
         cursor.execute('''
             INSERT INTO users (user_id, username, full_name, has_permission)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
         ''', (user.id, user.username, user.full_name, is_admin))
     else:
         is_admin = result[1]
         if user.username and user.username.lower() == INIT_ADMIN_USERNAME.lower():
             is_admin = 1
         cursor.execute('''
-            UPDATE users SET username = ?, full_name = ?, has_permission = ? WHERE user_id = ?
+            UPDATE users SET username = %s, full_name = %s, has_permission = %s WHERE user_id = %s
         ''', (user.username, user.full_name, is_admin, user.id))
 
     conn.commit()
@@ -143,9 +142,9 @@ def update_user_info(user):
 
 # 检查用户是否有管理权限
 def check_user_permission(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
-    cursor.execute("SELECT has_permission FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT has_permission FROM users WHERE user_id = %s", (user_id,))
     result = cursor.fetchone()
     conn.close()
     return result and result[0] == 1
@@ -153,11 +152,11 @@ def check_user_permission(user_id: int) -> bool:
 # 获取用户周期内的有效发言数
 def get_user_speech_count(user_id: int, period: str) -> int:
     start, end = get_time_range(period)
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     cursor.execute('''
         SELECT COUNT(*) FROM message_stats
-        WHERE user_id = ? AND message_time BETWEEN ? AND ? AND is_valid = 1
+        WHERE user_id = %s AND message_time BETWEEN %s AND %s AND is_valid = 1
     ''', (user_id, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")))
     count = cursor.fetchone()[0]
     conn.close()
@@ -190,9 +189,9 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             if not check_user_permission(user_id):
                 await message.reply_text("❌ 操作失败：您没有权限管理功能")
                 return
-            conn = sqlite3.connect(DB_PATH)
+            conn = psycopg2.connect(DATABASE_URL)
             cursor = conn.cursor()
-            cursor.execute("UPDATE users SET has_permission = 1 WHERE user_id = ?", (target_user_id,))
+            cursor.execute("UPDATE users SET has_permission = 1 WHERE user_id = %s", (target_user_id,))
             conn.commit()
             conn.close()
             await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 添积分管理权限")
@@ -205,11 +204,11 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await message.reply_text("❌ 操作失败：您没有积分管理权限")
                 return
             add_points = int(add_match.group(1))
-            conn = sqlite3.connect(DB_PATH)
+            conn = psycopg2.connect(DATABASE_URL)
             cursor = conn.cursor()
-            cursor.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (add_points, target_user_id))
+            cursor.execute("UPDATE users SET points = points + %s WHERE user_id = %s", (add_points, target_user_id))
             conn.commit()
-            cursor.execute("SELECT points FROM users WHERE user_id = ?", (target_user_id,))
+            cursor.execute("SELECT points FROM users WHERE user_id = %s", (target_user_id,))
             new_points = cursor.fetchone()[0]
             conn.close()
             await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 添加 {add_points} 积分\n当前总积分：{new_points}")
@@ -222,11 +221,11 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await message.reply_text("❌ 操作失败：您没有积分管理权限")
                 return
             reduce_points = int(reduce_match.group(1))
-            conn = sqlite3.connect(DB_PATH)
+            conn = psycopg2.connect(DATABASE_URL)
             cursor = conn.cursor()
-            cursor.execute("UPDATE users SET points = MAX(points - ?, 0) WHERE user_id = ?", (reduce_points, target_user_id))
+            cursor.execute("UPDATE users SET points = GREATEST(points - %s, 0) WHERE user_id = %s", (reduce_points, target_user_id))
             conn.commit()
-            cursor.execute("SELECT points FROM users WHERE user_id = ?", (target_user_id,))
+            cursor.execute("SELECT points FROM users WHERE user_id = %s", (target_user_id,))
             new_points = cursor.fetchone()[0]
             conn.close()
             await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 扣除 {reduce_points} 积分\n当前总积分：{new_points}")
@@ -234,13 +233,13 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # 有效发言统计与积分增加
     if is_valid_message(message):
-        conn = sqlite3.connect(DB_PATH)
+        conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO message_stats (user_id, chat_id, message_time)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
         ''', (user_id, chat.id, now.strftime("%Y-%m-%d %H:%M:%S")))
-        cursor.execute("UPDATE users SET points = points + 1 WHERE user_id = ?", (user_id,))
+        cursor.execute("UPDATE users SET points = points + 1 WHERE user_id = %s", (user_id,))
         conn.commit()
         conn.close()
 
@@ -248,20 +247,20 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         today_date = now.strftime("%Y-%m-%d")
         today_count = get_user_speech_count(user_id, "today")
         if today_count > DAILY_SPEECH_TARGET:
-            conn = sqlite3.connect(DB_PATH)
+            conn = psycopg2.connect(DATABASE_URL)
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT id FROM bonus_records
-                WHERE user_id = ? AND bonus_type = 'daily' AND period = ?
+                WHERE user_id = %s AND bonus_type = 'daily' AND period = %s
             ''', (user_id, today_date))
             if not cursor.fetchone():
-                cursor.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (DAILY_BONUS_POINTS, user_id))
+                cursor.execute("UPDATE users SET points = points + %s WHERE user_id = %s", (DAILY_BONUS_POINTS, user_id))
                 cursor.execute('''
                     INSERT INTO bonus_records (user_id, bonus_type, period)
-                    VALUES (?, 'daily', ?)
+                    VALUES (%s, 'daily', %s)
                 ''', (user_id, today_date))
                 conn.commit()
-                cursor.execute("SELECT points FROM users WHERE user_id = ?", (user_id,))
+                cursor.execute("SELECT points FROM users WHERE user_id = %s", (user_id,))
                 new_points = cursor.fetchone()[0]
                 conn.close()
                 await message.reply_text(f"🎉 恭喜您！今日有效发言突破{DAILY_SPEECH_TARGET}条，获得{DAILY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}")
@@ -272,20 +271,20 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         week_period = now.strftime("%Y-%W")
         week_count = get_user_speech_count(user_id, "week")
         if week_count > WEEKLY_SPEECH_TARGET:
-            conn = sqlite3.connect(DB_PATH)
+            conn = psycopg2.connect(DATABASE_URL)
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT id FROM bonus_records
-                WHERE user_id = ? AND bonus_type = 'weekly' AND period = ?
+                WHERE user_id = %s AND bonus_type = 'weekly' AND period = %s
             ''', (user_id, week_period))
             if not cursor.fetchone():
-                cursor.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (WEEKLY_BONUS_POINTS, user_id))
+                cursor.execute("UPDATE users SET points = points + %s WHERE user_id = %s", (WEEKLY_BONUS_POINTS, user_id))
                 cursor.execute('''
                     INSERT INTO bonus_records (user_id, bonus_type, period)
-                    VALUES (?, 'weekly', ?)
+                    VALUES (%s, 'weekly', %s)
                 ''', (user_id, week_period))
                 conn.commit()
-                cursor.execute("SELECT points FROM users WHERE user_id = ?", (user_id,))
+                cursor.execute("SELECT points FROM users WHERE user_id = %s", (user_id,))
                 new_points = cursor.fetchone()[0]
                 conn.close()
                 await message.reply_text(f"🏆 恭喜您！本周有效发言突破{WEEKLY_SPEECH_TARGET}条，获得{WEEKLY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}")
@@ -302,17 +301,17 @@ async def sign_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     today_date = datetime.now(TZ).strftime("%Y-%m-%d")
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM check_in WHERE user_id = ? AND check_in_date = ?", (user_id, today_date))
+    cursor.execute("SELECT id FROM check_in WHERE user_id = %s AND check_in_date = %s", (user_id, today_date))
     if cursor.fetchone():
         await message.reply_text("✅ 您今日已完成签到，请勿重复操作")
         conn.close()
         return
-    cursor.execute("INSERT INTO check_in (user_id, check_in_date) VALUES (?, ?)", (user_id, today_date))
-    cursor.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (SIGN_IN_POINTS, user_id))
+    cursor.execute("INSERT INTO check_in (user_id, check_in_date) VALUES (%s, %s)", (user_id, today_date))
+    cursor.execute("UPDATE users SET points = points + %s WHERE user_id = %s", (SIGN_IN_POINTS, user_id))
     conn.commit()
-    cursor.execute("SELECT points FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT points FROM users WHERE user_id = %s", (user_id,))
     new_points = cursor.fetchone()[0]
     conn.close()
 
@@ -330,9 +329,9 @@ async def get_my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today_count = get_user_speech_count(user_id, "today")
     week_count = get_user_speech_count(user_id, "week")
     month_count = get_user_speech_count(user_id, "month")
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
-    cursor.execute("SELECT points FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT points FROM users WHERE user_id = %s", (user_id,))
     total_points = cursor.fetchone()[0]
     conn.close()
 
@@ -353,16 +352,16 @@ async def get_rank(update: Update, context: ContextTypes.DEFAULT_TYPE, period: s
         return
 
     start, end = get_time_range(period)
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     cursor.execute('''
         SELECT u.user_id, u.username, u.full_name, COUNT(m.id) as speech_count
         FROM message_stats m
         LEFT JOIN users u ON m.user_id = u.user_id
-        WHERE m.chat_id = ? AND m.message_time BETWEEN ? AND ? AND m.is_valid = 1
-        GROUP BY m.user_id
+        WHERE m.chat_id = %s AND m.message_time BETWEEN %s AND %s AND m.is_valid = 1
+        GROUP BY m.user_id, u.user_id, u.username, u.full_name
         ORDER BY speech_count DESC
-        LIMIT ?
+        LIMIT %s
     ''', (chat.id, start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"), RANK_SHOW_LIMIT))
     rank_list = cursor.fetchall()
     conn.close()
@@ -389,6 +388,8 @@ async def month_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not BOT_TOKEN:
         raise ValueError("请在Railway环境变量中配置BOT_TOKEN")
+    if not DATABASE_URL:
+        raise ValueError("请在Railway环境变量中配置DATABASE_URL")
     init_db()
     print("数据库初始化完成，机器人启动中...")
 
