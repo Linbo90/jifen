@@ -376,7 +376,7 @@ async def get_rank(update: Update, context: ContextTypes.DEFAULT_TYPE, period: s
 
     await message.reply_text(text)
 
-# 新增：总积分排行榜
+# 总积分排行榜
 async def points_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     message = update.effective_message
@@ -427,16 +427,15 @@ def main():
     # 创建机器人应用
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # 指令处理器
+    # 仅保留英文指令（符合Telegram API规范，无中文，彻底避免崩溃）
     application.add_handler(CommandHandler("sign", sign_in))
     application.add_handler(CommandHandler("mystats", get_my_stats))
     application.add_handler(CommandHandler("todayrank", today_rank))
     application.add_handler(CommandHandler("weekrank", week_rank))
     application.add_handler(CommandHandler("monthrank", month_rank))
     application.add_handler(CommandHandler("pointsrank", points_rank))
-    application.add_handler(CommandHandler("积分排名", points_rank))
 
-    # 中文关键词触发处理器
+    # 中文关键词触发处理器（所有中文功能都在这里实现，完全兼容你的需求）
     application.add_handler(MessageHandler(filters.Regex(r"^签到$") & filters.ChatType.GROUPS, sign_in))
     application.add_handler(MessageHandler(filters.Regex(r"^我的数据$") & filters.ChatType.GROUPS, get_my_stats))
     application.add_handler(MessageHandler(filters.Regex(r"^今日排名$") & filters.ChatType.GROUPS, today_rank))
