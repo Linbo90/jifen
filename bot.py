@@ -110,7 +110,7 @@ def is_valid_message(message) -> bool:
     clean_text = message.text.strip()
     if len(clean_text) < VALID_MESSAGE_MIN_LENGTH:
         return False
-    exclude_keywords = ["签到", "今日排名", "本周排名", "本月排名", "我的数据", "添加积分", "减少积分", "添加权限"]
+    exclude_keywords = ["签到", "今日排名", "本周排名", "本月排名", "积分排名", "我的数据", "添加积分", "减少积分", "添加权限"]
     for keyword in exclude_keywords:
         if clean_text == keyword or clean_text.startswith(f"/{keyword}"):
             return False
@@ -376,7 +376,38 @@ async def get_rank(update: Update, context: ContextTypes.DEFAULT_TYPE, period: s
 
     await message.reply_text(text)
 
-# 排名指令
+# 新增：总积分排行榜
+async def points_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or chat.type not in ["group", "supergroup"]:
+        return
+
+    # 查询所有用户按总积分降序排序
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT username, full_name, points
+        FROM users
+        WHERE points > 0
+        ORDER BY points DESC
+        LIMIT %s
+    ''', (RANK_SHOW_LIMIT,))
+    rank_list = cursor.fetchall()
+    conn.close()
+
+    # 拼接排名内容
+    text = f"💰 总积分排行榜\n\n"
+    if not rank_list:
+        text += "暂无积分数据"
+    else:
+        for idx, (username, full_name, points) in enumerate(rank_list, 1):
+            display_name = f"@{username}" if username else full_name
+            text += f"第{idx}名：{display_name} | {points} 积分\n"
+
+    await message.reply_text(text)
+
+# 周期排名指令
 async def today_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_rank(update, context, "today", "今日")
 async def week_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -396,19 +427,22 @@ def main():
     # 创建机器人应用
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # 仅保留英文指令（符合Telegram API规范）
+    # 指令处理器
     application.add_handler(CommandHandler("sign", sign_in))
     application.add_handler(CommandHandler("mystats", get_my_stats))
     application.add_handler(CommandHandler("todayrank", today_rank))
     application.add_handler(CommandHandler("weekrank", week_rank))
     application.add_handler(CommandHandler("monthrank", month_rank))
+    application.add_handler(CommandHandler("pointsrank", points_rank))
+    application.add_handler(CommandHandler("积分排名", points_rank))
 
-    # 中文关键词触发处理器（完全兼容原功能，不触发报错）
+    # 中文关键词触发处理器
     application.add_handler(MessageHandler(filters.Regex(r"^签到$") & filters.ChatType.GROUPS, sign_in))
     application.add_handler(MessageHandler(filters.Regex(r"^我的数据$") & filters.ChatType.GROUPS, get_my_stats))
     application.add_handler(MessageHandler(filters.Regex(r"^今日排名$") & filters.ChatType.GROUPS, today_rank))
     application.add_handler(MessageHandler(filters.Regex(r"^本周排名$") & filters.ChatType.GROUPS, week_rank))
     application.add_handler(MessageHandler(filters.Regex(r"^本月排名$") & filters.ChatType.GROUPS, month_rank))
+    application.add_handler(MessageHandler(filters.Regex(r"^积分排名$") & filters.ChatType.GROUPS, points_rank))
 
     # 注册群消息通用处理器（必须放在最后）
     application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, handle_group_message))
