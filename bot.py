@@ -20,7 +20,7 @@ INIT_ADMIN_USERNAME = os.getenv("INIT_ADMIN_USERNAME", "lmdoi")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 TZ = timezone(os.getenv("TZ", "Asia/Shanghai"))
 # 规则配置（也可在Railway环境变量自定义）
-VALID_MESSAGE_MIN_LENGTH = int(os.getenv("VALID_MESSAGE_MIN_LENGTH", 5))
+VALID_MESSAGE_MIN_LENGTH = int(os.getenv("VALID_MESSAGE_MIN_LENGTH", 3))
 SIGN_IN_POINTS = int(os.getenv("SIGN_IN_POINTS", 80))
 DAILY_SPEECH_TARGET = int(os.getenv("DAILY_SPEECH_TARGET", 288))
 DAILY_BONUS_POINTS = int(os.getenv("DAILY_BONUS_POINTS", 288))
@@ -28,7 +28,7 @@ WEEKLY_SPEECH_TARGET = int(os.getenv("WEEKLY_SPEECH_TARGET", 2888))
 WEEKLY_BONUS_POINTS = int(os.getenv("WEEKLY_BONUS_POINTS", 1688))
 RANK_SHOW_LIMIT = int(os.getenv("RANK_SHOW_LIMIT", 10))
 # 自动删除消息延迟时间（单位：秒，默认60秒）
-AUTO_DELETE_DELAY = 60
+AUTO_DELETE_DELAY = 120
 # ========================================================================================
 
 # 数据库初始化
@@ -139,18 +139,31 @@ def get_time_range(period: str):
         end = next_month - timedelta(seconds=1)
     return start, end
 
-# 判断是否为有效发言
-def is_valid_message(message) -> bool:
-    if not message.text:
+# 【修改后】有效内容判断：支持文本/语音/图片/视频，排除贴纸/GIF/指令
+def is_valid_content(message) -> bool:
+    # 1. 语音消息：直接算有效
+    if message.voice:
+        return True
+    # 2. 图片/视频消息：直接算有效
+    if message.photo or message.video:
+        return True
+    # 3. 贴纸/GIF动画：不算有效
+    if message.sticker or message.animation:
         return False
-    clean_text = message.text.strip()
-    if len(clean_text) < VALID_MESSAGE_MIN_LENGTH:
-        return False
-    exclude_keywords = ["签到", "今日排名", "本周排名", "本月排名", "积分排名", "我的数据", "添加积分", "减少积分", "添加权限"]
-    for keyword in exclude_keywords:
-        if clean_text == keyword or clean_text.startswith(f"/{keyword}"):
+    # 4. 文本消息：走原有长度+关键词排除规则
+    if message.text:
+        clean_text = message.text.strip()
+        # 长度不足排除
+        if len(clean_text) < VALID_MESSAGE_MIN_LENGTH:
             return False
-    return True
+        # 指令关键词排除
+        exclude_keywords = ["签到", "今日排名", "本周排名", "本月排名", "积分排名", "我的数据", "添加积分", "减少积分", "添加权限"]
+        for keyword in exclude_keywords:
+            if clean_text == keyword or clean_text.startswith(f"/{keyword}"):
+                return False
+        return True
+    # 其他类型（文件、位置等）：不算有效
+    return False
 
 # 更新/新增用户信息到数据库
 def update_user_info(user):
@@ -199,7 +212,7 @@ def get_user_speech_count(user_id: int, period: str) -> int:
     return count
 
 # ===================== 核心功能处理函数 =====================
-# 群消息主处理函数（统计发言、积分、自动奖励）
+# 【修改后】群消息主处理函数：支持语音/图片/视频的统计与积分
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     user = update.effective_user
@@ -211,7 +224,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = user.id
     now = datetime.now(TZ)
 
-    # 权限/积分管理指令（回复消息触发）
+    # 权限/积分管理指令（回复消息触发，仅文本）
     if message.reply_to_message and message.text:
         target_user = message.reply_to_message.from_user
         if not target_user or target_user.is_bot:
@@ -267,8 +280,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await safe_reply_text(message, f"✅ 已成功为 @{target_user.username or target_user.full_name} 扣除 {reduce_points} 积分\n当前总积分：{new_points}", context)
             return
 
-    # 有效发言统计与积分增加
-    if is_valid_message(message):
+    # 【核心修改】有效内容统计：文本/语音/图片/视频 都走这里
+    if is_valid_content(message):
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute('''
@@ -479,7 +492,15 @@ def main():
     # 注册全局错误处理器
     application.add_error_handler(global_error_handler)
 
-    # 英文指令
+    # 【新增】中文斜杠指令
+    application.add_handler(CommandHandler("签到", sign_in))
+    application.add_handler(CommandHandler("我的数据", get_my_stats))
+    application.add_handler(CommandHandler("积分排名", points_rank))
+    application.add_handler(CommandHandler("今日排名", today_rank))
+    application.add_handler(CommandHandler("本周排名", week_rank))
+    application.add_handler(CommandHandler("本月排名", month_rank))
+
+    # 原有英文指令
     application.add_handler(CommandHandler("sign", sign_in))
     application.add_handler(CommandHandler("mystats", get_my_stats))
     application.add_handler(CommandHandler("todayrank", today_rank))
@@ -495,8 +516,11 @@ def main():
     application.add_handler(MessageHandler(filters.Regex(r"^本月排名$") & filters.ChatType.GROUPS, month_rank))
     application.add_handler(MessageHandler(filters.Regex(r"^积分排名$") & filters.ChatType.GROUPS, points_rank))
 
-    # 群消息通用处理器
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, handle_group_message))
+    # 【修改】群消息通用处理器：新增语音/图片/视频的过滤器
+    application.add_handler(MessageHandler(
+        (filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL) & (filters.TEXT | filters.VOICE | filters.PHOTO | filters.VIDEO),
+        handle_group_message
+    ))
 
     # 启动长轮询，无弃用参数
     application.run_polling(
