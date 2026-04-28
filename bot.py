@@ -101,7 +101,7 @@ async def safe_reply_text(message, text: str, context: ContextTypes.DEFAULT_TYPE
     try:
         reply_msg = await message.reply_text(text)
         # 如果传入了context，自动注册60秒后删除任务
-        if context and reply_msg:
+        if context and reply_msg and context.application.job_queue:
             context.application.job_queue.run_once(
                 auto_delete_message,
                 when=AUTO_DELETE_DELAY,
@@ -453,8 +453,8 @@ async def week_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def month_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_rank(update, context, "month", "本月")
 
-# 启动前清理Webhook，避免冲突
-async def startup_cleanup(app: Application):
+# 启动后初始化：清理Webhook，避免冲突
+async def post_init(app: Application):
     await app.bot.delete_webhook(drop_pending_updates=True)
     print("✅ 已清理Webhook和历史更新，机器人启动完成")
 
@@ -467,11 +467,14 @@ def main():
     init_db()
     print("数据库初始化完成，机器人启动中...")
 
-    # 创建机器人应用
-    application = Application.builder().token(BOT_TOKEN).build()
+    # 创建机器人应用，启用post_init钩子，确保初始化顺序正确
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
-    # 注册启动钩子
-    application.job_queue.run_once(startup_cleanup, when=0)
     # 注册全局错误处理器（核心修复，彻底避免崩溃）
     application.add_error_handler(global_error_handler)
 
