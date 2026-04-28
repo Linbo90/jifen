@@ -27,6 +27,8 @@ DAILY_BONUS_POINTS = int(os.getenv("DAILY_BONUS_POINTS", 288))
 WEEKLY_SPEECH_TARGET = int(os.getenv("WEEKLY_SPEECH_TARGET", 2888))
 WEEKLY_BONUS_POINTS = int(os.getenv("WEEKLY_BONUS_POINTS", 1688))
 RANK_SHOW_LIMIT = int(os.getenv("RANK_SHOW_LIMIT", 10))
+# 自动删除消息延迟时间（单位：秒，默认60秒）
+AUTO_DELETE_DELAY = 60
 # ========================================================================================
 
 # 数据库初始化
@@ -83,7 +85,18 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ===================== 辅助工具函数 =====================
+# ===================== 核心辅助函数 =====================
+# 通用：延迟自动删除消息
+async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+    try:
+        # 等待指定延迟时间
+        await asyncio.sleep(AUTO_DELETE_DELAY)
+        # 执行删除操作
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as e:
+        # 忽略所有异常（权限不足、消息已被删除、网络超时等），不影响主程序运行
+        print(f"自动删除消息失败（chat_id:{chat_id}, message_id:{message_id}）：{str(e)}")
+
 # 获取周期时间范围（今日/本周/本月）
 def get_time_range(period: str):
     now = datetime.now(TZ)
@@ -187,21 +200,24 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # 添加权限
         if text == "添加权限":
             if not check_user_permission(user_id):
-                await message.reply_text("❌ 操作失败：您没有权限管理功能")
+                reply_msg = await message.reply_text("❌ 操作失败：您没有权限管理功能")
+                await auto_delete_message(context, chat.id, reply_msg.message_id)
                 return
             conn = psycopg2.connect(DATABASE_URL)
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET has_permission = 1 WHERE user_id = %s", (target_user_id,))
             conn.commit()
             conn.close()
-            await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 添积分管理权限")
+            reply_msg = await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 添积分管理权限")
+            await auto_delete_message(context, chat.id, reply_msg.message_id)
             return
 
         # 添加积分
         add_match = re.match(r"^添加积分\s+(\d+)$", text)
         if add_match:
             if not check_user_permission(user_id):
-                await message.reply_text("❌ 操作失败：您没有积分管理权限")
+                reply_msg = await message.reply_text("❌ 操作失败：您没有积分管理权限")
+                await auto_delete_message(context, chat.id, reply_msg.message_id)
                 return
             add_points = int(add_match.group(1))
             conn = psycopg2.connect(DATABASE_URL)
@@ -211,14 +227,16 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             cursor.execute("SELECT points FROM users WHERE user_id = %s", (target_user_id,))
             new_points = cursor.fetchone()[0]
             conn.close()
-            await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 添加 {add_points} 积分\n当前总积分：{new_points}")
+            reply_msg = await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 添加 {add_points} 积分\n当前总积分：{new_points}")
+            await auto_delete_message(context, chat.id, reply_msg.message_id)
             return
 
         # 减少积分
         reduce_match = re.match(r"^减少积分\s+(\d+)$", text)
         if reduce_match:
             if not check_user_permission(user_id):
-                await message.reply_text("❌ 操作失败：您没有积分管理权限")
+                reply_msg = await message.reply_text("❌ 操作失败：您没有积分管理权限")
+                await auto_delete_message(context, chat.id, reply_msg.message_id)
                 return
             reduce_points = int(reduce_match.group(1))
             conn = psycopg2.connect(DATABASE_URL)
@@ -228,7 +246,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             cursor.execute("SELECT points FROM users WHERE user_id = %s", (target_user_id,))
             new_points = cursor.fetchone()[0]
             conn.close()
-            await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 扣除 {reduce_points} 积分\n当前总积分：{new_points}")
+            reply_msg = await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 扣除 {reduce_points} 积分\n当前总积分：{new_points}")
+            await auto_delete_message(context, chat.id, reply_msg.message_id)
             return
 
     # 有效发言统计与积分增加
@@ -263,7 +282,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 cursor.execute("SELECT points FROM users WHERE user_id = %s", (user_id,))
                 new_points = cursor.fetchone()[0]
                 conn.close()
-                await message.reply_text(f"🎉 恭喜您！今日有效发言突破{DAILY_SPEECH_TARGET}条，获得{DAILY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}")
+                reply_msg = await message.reply_text(f"🎉 恭喜您！今日有效发言突破{DAILY_SPEECH_TARGET}条，获得{DAILY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}")
+                await auto_delete_message(context, chat.id, reply_msg.message_id)
             else:
                 conn.close()
 
@@ -287,7 +307,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 cursor.execute("SELECT points FROM users WHERE user_id = %s", (user_id,))
                 new_points = cursor.fetchone()[0]
                 conn.close()
-                await message.reply_text(f"🏆 恭喜您！本周有效发言突破{WEEKLY_SPEECH_TARGET}条，获得{WEEKLY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}")
+                reply_msg = await message.reply_text(f"🏆 恭喜您！本周有效发言突破{WEEKLY_SPEECH_TARGET}条，获得{WEEKLY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}")
+                await auto_delete_message(context, chat.id, reply_msg.message_id)
             else:
                 conn.close()
 
@@ -295,7 +316,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 async def sign_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
-    if not user or user.is_bot:
+    chat = update.effective_chat
+    if not user or user.is_bot or not chat:
         return
     update_user_info(user)
     user_id = user.id
@@ -305,7 +327,8 @@ async def sign_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM check_in WHERE user_id = %s AND check_in_date = %s", (user_id, today_date))
     if cursor.fetchone():
-        await message.reply_text("✅ 您今日已完成签到，请勿重复操作")
+        reply_msg = await message.reply_text("✅ 您今日已完成签到，请勿重复操作")
+        await auto_delete_message(context, chat.id, reply_msg.message_id)
         conn.close()
         return
     cursor.execute("INSERT INTO check_in (user_id, check_in_date) VALUES (%s, %s)", (user_id, today_date))
@@ -315,13 +338,15 @@ async def sign_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_points = cursor.fetchone()[0]
     conn.close()
 
-    await message.reply_text(f"✅ 签到成功！获得{SIGN_IN_POINTS}积分\n当前总积分：{new_points}")
+    reply_msg = await message.reply_text(f"✅ 签到成功！获得{SIGN_IN_POINTS}积分\n当前总积分：{new_points}")
+    await auto_delete_message(context, chat.id, reply_msg.message_id)
 
 # 个人数据查询
 async def get_my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
-    if not user or user.is_bot:
+    chat = update.effective_chat
+    if not user or user.is_bot or not chat:
         return
     update_user_info(user)
     user_id = user.id
@@ -342,7 +367,8 @@ async def get_my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"📆 本周有效发言：{week_count} 条\n"
     text += f"📅 本月有效发言：{month_count} 条"
 
-    await message.reply_text(text)
+    reply_msg = await message.reply_text(text)
+    await auto_delete_message(context, chat.id, reply_msg.message_id)
 
 # 排名查询通用函数
 async def get_rank(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str, title: str):
@@ -374,7 +400,8 @@ async def get_rank(update: Update, context: ContextTypes.DEFAULT_TYPE, period: s
             display_name = f"@{username}" if username else full_name
             text += f"第{idx}名：{display_name} | {count} 条\n"
 
-    await message.reply_text(text)
+    reply_msg = await message.reply_text(text)
+    await auto_delete_message(context, chat.id, reply_msg.message_id)
 
 # 总积分排行榜
 async def points_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -405,7 +432,8 @@ async def points_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
             display_name = f"@{username}" if username else full_name
             text += f"第{idx}名：{display_name} | {points} 积分\n"
 
-    await message.reply_text(text)
+    reply_msg = await message.reply_text(text)
+    await auto_delete_message(context, chat.id, reply_msg.message_id)
 
 # 周期排名指令
 async def today_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
