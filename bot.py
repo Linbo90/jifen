@@ -86,16 +86,39 @@ def init_db():
     conn.close()
 
 # ===================== 核心辅助函数 =====================
-# 通用：延迟自动删除消息
-async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+# 全局错误处理器：捕获所有未处理异常，避免程序崩溃
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print(f"捕获到全局异常: {context.error}")
+    # 仅当有有效消息和聊天时，才发送错误提示
+    if update and isinstance(update, Update) and update.effective_message and update.effective_chat:
+        try:
+            await update.effective_message.reply_text("⚠️ 操作执行失败，请稍后重试")
+        except Exception:
+            pass
+
+# 通用：安全发送回复消息，带异常捕获，避免崩溃
+async def safe_reply_text(message, text: str, context: ContextTypes.DEFAULT_TYPE = None):
     try:
-        # 等待指定延迟时间
-        await asyncio.sleep(AUTO_DELETE_DELAY)
-        # 执行删除操作
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        reply_msg = await message.reply_text(text)
+        # 如果传入了context，自动注册60秒后删除任务
+        if context and reply_msg and context.application.job_queue:
+            context.application.job_queue.run_once(
+                auto_delete_message,
+                when=AUTO_DELETE_DELAY,
+                data={"chat_id": message.chat.id, "message_id": reply_msg.message_id}
+            )
+        return reply_msg
     except Exception as e:
-        # 忽略所有异常（权限不足、消息已被删除、网络超时等），不影响主程序运行
-        print(f"自动删除消息失败（chat_id:{chat_id}, message_id:{message_id}）：{str(e)}")
+        print(f"回复消息失败: {str(e)}")
+        return None
+
+# 通用：延迟自动删除消息
+async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        data = context.job.data
+        await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["message_id"])
+    except Exception as e:
+        print(f"自动删除消息失败: {str(e)}")
 
 # 获取周期时间范围（今日/本周/本月）
 def get_time_range(period: str):
@@ -200,24 +223,21 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # 添加权限
         if text == "添加权限":
             if not check_user_permission(user_id):
-                reply_msg = await message.reply_text("❌ 操作失败：您没有权限管理功能")
-                await auto_delete_message(context, chat.id, reply_msg.message_id)
+                await safe_reply_text(message, "❌ 操作失败：您没有权限管理功能", context)
                 return
             conn = psycopg2.connect(DATABASE_URL)
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET has_permission = 1 WHERE user_id = %s", (target_user_id,))
             conn.commit()
             conn.close()
-            reply_msg = await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 添积分管理权限")
-            await auto_delete_message(context, chat.id, reply_msg.message_id)
+            await safe_reply_text(message, f"✅ 已成功为 @{target_user.username or target_user.full_name} 添积分管理权限", context)
             return
 
         # 添加积分
         add_match = re.match(r"^添加积分\s+(\d+)$", text)
         if add_match:
             if not check_user_permission(user_id):
-                reply_msg = await message.reply_text("❌ 操作失败：您没有积分管理权限")
-                await auto_delete_message(context, chat.id, reply_msg.message_id)
+                await safe_reply_text(message, "❌ 操作失败：您没有积分管理权限", context)
                 return
             add_points = int(add_match.group(1))
             conn = psycopg2.connect(DATABASE_URL)
@@ -227,16 +247,14 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             cursor.execute("SELECT points FROM users WHERE user_id = %s", (target_user_id,))
             new_points = cursor.fetchone()[0]
             conn.close()
-            reply_msg = await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 添加 {add_points} 积分\n当前总积分：{new_points}")
-            await auto_delete_message(context, chat.id, reply_msg.message_id)
+            await safe_reply_text(message, f"✅ 已成功为 @{target_user.username or target_user.full_name} 添加 {add_points} 积分\n当前总积分：{new_points}", context)
             return
 
         # 减少积分
         reduce_match = re.match(r"^减少积分\s+(\d+)$", text)
         if reduce_match:
             if not check_user_permission(user_id):
-                reply_msg = await message.reply_text("❌ 操作失败：您没有积分管理权限")
-                await auto_delete_message(context, chat.id, reply_msg.message_id)
+                await safe_reply_text(message, "❌ 操作失败：您没有积分管理权限", context)
                 return
             reduce_points = int(reduce_match.group(1))
             conn = psycopg2.connect(DATABASE_URL)
@@ -246,8 +264,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             cursor.execute("SELECT points FROM users WHERE user_id = %s", (target_user_id,))
             new_points = cursor.fetchone()[0]
             conn.close()
-            reply_msg = await message.reply_text(f"✅ 已成功为 @{target_user.username or target_user.full_name} 扣除 {reduce_points} 积分\n当前总积分：{new_points}")
-            await auto_delete_message(context, chat.id, reply_msg.message_id)
+            await safe_reply_text(message, f"✅ 已成功为 @{target_user.username or target_user.full_name} 扣除 {reduce_points} 积分\n当前总积分：{new_points}", context)
             return
 
     # 有效发言统计与积分增加
@@ -282,8 +299,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 cursor.execute("SELECT points FROM users WHERE user_id = %s", (user_id,))
                 new_points = cursor.fetchone()[0]
                 conn.close()
-                reply_msg = await message.reply_text(f"🎉 恭喜您！今日有效发言突破{DAILY_SPEECH_TARGET}条，获得{DAILY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}")
-                await auto_delete_message(context, chat.id, reply_msg.message_id)
+                await safe_reply_text(message, f"🎉 恭喜您！今日有效发言突破{DAILY_SPEECH_TARGET}条，获得{DAILY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}", context)
             else:
                 conn.close()
 
@@ -307,8 +323,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 cursor.execute("SELECT points FROM users WHERE user_id = %s", (user_id,))
                 new_points = cursor.fetchone()[0]
                 conn.close()
-                reply_msg = await message.reply_text(f"🏆 恭喜您！本周有效发言突破{WEEKLY_SPEECH_TARGET}条，获得{WEEKLY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}")
-                await auto_delete_message(context, chat.id, reply_msg.message_id)
+                await safe_reply_text(message, f"🏆 恭喜您！本周有效发言突破{WEEKLY_SPEECH_TARGET}条，获得{WEEKLY_BONUS_POINTS}积分奖励\n当前总积分：{new_points}", context)
             else:
                 conn.close()
 
@@ -317,7 +332,7 @@ async def sign_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
     chat = update.effective_chat
-    if not user or user.is_bot or not chat:
+    if not user or user.is_bot or not chat or not message:
         return
     update_user_info(user)
     user_id = user.id
@@ -327,8 +342,7 @@ async def sign_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM check_in WHERE user_id = %s AND check_in_date = %s", (user_id, today_date))
     if cursor.fetchone():
-        reply_msg = await message.reply_text("✅ 您今日已完成签到，请勿重复操作")
-        await auto_delete_message(context, chat.id, reply_msg.message_id)
+        await safe_reply_text(message, "✅ 您今日已完成签到，请勿重复操作", context)
         conn.close()
         return
     cursor.execute("INSERT INTO check_in (user_id, check_in_date) VALUES (%s, %s)", (user_id, today_date))
@@ -338,15 +352,14 @@ async def sign_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_points = cursor.fetchone()[0]
     conn.close()
 
-    reply_msg = await message.reply_text(f"✅ 签到成功！获得{SIGN_IN_POINTS}积分\n当前总积分：{new_points}")
-    await auto_delete_message(context, chat.id, reply_msg.message_id)
+    await safe_reply_text(message, f"✅ 签到成功！获得{SIGN_IN_POINTS}积分\n当前总积分：{new_points}", context)
 
 # 个人数据查询
 async def get_my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
     chat = update.effective_chat
-    if not user or user.is_bot or not chat:
+    if not user or user.is_bot or not chat or not message:
         return
     update_user_info(user)
     user_id = user.id
@@ -367,14 +380,13 @@ async def get_my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"📆 本周有效发言：{week_count} 条\n"
     text += f"📅 本月有效发言：{month_count} 条"
 
-    reply_msg = await message.reply_text(text)
-    await auto_delete_message(context, chat.id, reply_msg.message_id)
+    await safe_reply_text(message, text, context)
 
 # 排名查询通用函数
 async def get_rank(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str, title: str):
     chat = update.effective_chat
     message = update.effective_message
-    if not chat or chat.type not in ["group", "supergroup"]:
+    if not chat or chat.type not in ["group", "supergroup"] or not message:
         return
 
     start, end = get_time_range(period)
@@ -400,14 +412,13 @@ async def get_rank(update: Update, context: ContextTypes.DEFAULT_TYPE, period: s
             display_name = f"@{username}" if username else full_name
             text += f"第{idx}名：{display_name} | {count} 条\n"
 
-    reply_msg = await message.reply_text(text)
-    await auto_delete_message(context, chat.id, reply_msg.message_id)
+    await safe_reply_text(message, text, context)
 
 # 总积分排行榜
 async def points_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     message = update.effective_message
-    if not chat or chat.type not in ["group", "supergroup"]:
+    if not chat or chat.type not in ["group", "supergroup"] or not message:
         return
 
     # 查询所有用户按总积分降序排序
@@ -432,8 +443,7 @@ async def points_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
             display_name = f"@{username}" if username else full_name
             text += f"第{idx}名：{display_name} | {points} 积分\n"
 
-    reply_msg = await message.reply_text(text)
-    await auto_delete_message(context, chat.id, reply_msg.message_id)
+    await safe_reply_text(message, text, context)
 
 # 周期排名指令
 async def today_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -442,6 +452,11 @@ async def week_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_rank(update, context, "week", "本周")
 async def month_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_rank(update, context, "month", "本月")
+
+# 启动后初始化：清理Webhook，避免冲突
+async def post_init(app: Application):
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    print("✅ 已清理Webhook和历史更新，机器人启动完成")
 
 # ===================== 机器人启动入口 =====================
 def main():
@@ -452,18 +467,18 @@ def main():
     init_db()
     print("数据库初始化完成，机器人启动中...")
 
-    # 创建机器人应用
-    application = Application.builder().token(BOT_TOKEN).build()
+    # 创建机器人应用，启用post_init钩子，确保初始化顺序正确
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
-    # 启动前强制删除Webhook，彻底避免和长轮询冲突
-    async def delete_webhook_on_startup(app: Application):
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        print("已清理Webhook，长轮询模式启动")
+    # 注册全局错误处理器（核心修复，彻底避免崩溃）
+    application.add_error_handler(global_error_handler)
 
-    # 注册启动钩子
-    application.job_queue.run_once(delete_webhook_on_startup, when=0)
-
-    # 仅保留英文指令（符合Telegram API规范，无中文，彻底避免崩溃）
+    # 英文指令（符合Telegram API规范）
     application.add_handler(CommandHandler("sign", sign_in))
     application.add_handler(CommandHandler("mystats", get_my_stats))
     application.add_handler(CommandHandler("todayrank", today_rank))
@@ -471,7 +486,7 @@ def main():
     application.add_handler(CommandHandler("monthrank", month_rank))
     application.add_handler(CommandHandler("pointsrank", points_rank))
 
-    # 中文关键词触发处理器（所有中文功能都在这里实现，完全兼容你的需求）
+    # 中文关键词触发处理器
     application.add_handler(MessageHandler(filters.Regex(r"^签到$") & filters.ChatType.GROUPS, sign_in))
     application.add_handler(MessageHandler(filters.Regex(r"^我的数据$") & filters.ChatType.GROUPS, get_my_stats))
     application.add_handler(MessageHandler(filters.Regex(r"^今日排名$") & filters.ChatType.GROUPS, today_rank))
@@ -479,15 +494,14 @@ def main():
     application.add_handler(MessageHandler(filters.Regex(r"^本月排名$") & filters.ChatType.GROUPS, month_rank))
     application.add_handler(MessageHandler(filters.Regex(r"^积分排名$") & filters.ChatType.GROUPS, points_rank))
 
-    # 注册群消息通用处理器（必须放在最后）
+    # 群消息通用处理器（必须放在最后）
     application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, handle_group_message))
 
-    # 启动长轮询（优化参数，彻底避免冲突）
+    # 启动长轮询（仅保留版本兼容的参数，彻底解决参数错误）
     application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=["message", "callback_query"],
-        pool_timeout=30,
-        close_session=True
+        allowed_updates=["message"],
+        pool_timeout=30
     )
 
 if __name__ == "__main__":
