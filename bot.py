@@ -20,7 +20,7 @@ INIT_ADMIN_USERNAME = os.getenv("INIT_ADMIN_USERNAME", "lmdoi")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 TZ = timezone(os.getenv("TZ", "Asia/Shanghai"))
 # 规则配置（也可在Railway环境变量自定义）
-VALID_MESSAGE_MIN_LENGTH = int(os.getenv("VALID_MESSAGE_MIN_LENGTH", 3))
+VALID_MESSAGE_MIN_LENGTH = int(os.getenv("VALID_MESSAGE_MIN_LENGTH", 5))
 SIGN_IN_POINTS = int(os.getenv("SIGN_IN_POINTS", 80))
 DAILY_SPEECH_TARGET = int(os.getenv("DAILY_SPEECH_TARGET", 288))
 DAILY_BONUS_POINTS = int(os.getenv("DAILY_BONUS_POINTS", 288))
@@ -28,7 +28,7 @@ WEEKLY_SPEECH_TARGET = int(os.getenv("WEEKLY_SPEECH_TARGET", 2888))
 WEEKLY_BONUS_POINTS = int(os.getenv("WEEKLY_BONUS_POINTS", 1688))
 RANK_SHOW_LIMIT = int(os.getenv("RANK_SHOW_LIMIT", 10))
 # 自动删除消息延迟时间（单位：秒，默认60秒）
-AUTO_DELETE_DELAY = 120
+AUTO_DELETE_DELAY = 60
 # ========================================================================================
 
 # 数据库初始化
@@ -139,7 +139,7 @@ def get_time_range(period: str):
         end = next_month - timedelta(seconds=1)
     return start, end
 
-# 【修改后】有效内容判断：支持文本/语音/图片/视频，排除贴纸/GIF/指令
+# 有效内容判断：支持文本/语音/图片/视频，排除贴纸/GIF/指令
 def is_valid_content(message) -> bool:
     # 1. 语音消息：直接算有效
     if message.voice:
@@ -212,7 +212,7 @@ def get_user_speech_count(user_id: int, period: str) -> int:
     return count
 
 # ===================== 核心功能处理函数 =====================
-# 【修改后】群消息主处理函数：支持语音/图片/视频的统计与积分
+# 群消息主处理函数：支持语音/图片/视频的统计与积分
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     user = update.effective_user
@@ -280,7 +280,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await safe_reply_text(message, f"✅ 已成功为 @{target_user.username or target_user.full_name} 扣除 {reduce_points} 积分\n当前总积分：{new_points}", context)
             return
 
-    # 【核心修改】有效内容统计：文本/语音/图片/视频 都走这里
+    # 有效内容统计：文本/语音/图片/视频 都走这里
     if is_valid_content(message):
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -492,15 +492,7 @@ def main():
     # 注册全局错误处理器
     application.add_error_handler(global_error_handler)
 
-    # 【新增】中文斜杠指令
-    application.add_handler(CommandHandler("签到", sign_in))
-    application.add_handler(CommandHandler("我的数据", get_my_stats))
-    application.add_handler(CommandHandler("积分排名", points_rank))
-    application.add_handler(CommandHandler("今日排名", today_rank))
-    application.add_handler(CommandHandler("本周排名", week_rank))
-    application.add_handler(CommandHandler("本月排名", month_rank))
-
-    # 原有英文指令
+    # 仅保留英文指令（符合Telegram API规范，无中文，彻底避免崩溃）
     application.add_handler(CommandHandler("sign", sign_in))
     application.add_handler(CommandHandler("mystats", get_my_stats))
     application.add_handler(CommandHandler("todayrank", today_rank))
@@ -508,21 +500,27 @@ def main():
     application.add_handler(CommandHandler("monthrank", month_rank))
     application.add_handler(CommandHandler("pointsrank", points_rank))
 
-    # 中文关键词触发处理器
-    application.add_handler(MessageHandler(filters.Regex(r"^签到$") & filters.ChatType.GROUPS, sign_in))
-    application.add_handler(MessageHandler(filters.Regex(r"^我的数据$") & filters.ChatType.GROUPS, get_my_stats))
-    application.add_handler(MessageHandler(filters.Regex(r"^今日排名$") & filters.ChatType.GROUPS, today_rank))
-    application.add_handler(MessageHandler(filters.Regex(r"^本周排名$") & filters.ChatType.GROUPS, week_rank))
-    application.add_handler(MessageHandler(filters.Regex(r"^本月排名$") & filters.ChatType.GROUPS, month_rank))
-    application.add_handler(MessageHandler(filters.Regex(r"^积分排名$") & filters.ChatType.GROUPS, points_rank))
+    # 【核心修复】斜杠中文指令 + 纯中文关键词 统一用MessageHandler实现，彻底避免崩溃
+    # 签到
+    application.add_handler(MessageHandler(filters.Regex(r"^/?签到$") & filters.ChatType.GROUPS, sign_in))
+    # 我的数据
+    application.add_handler(MessageHandler(filters.Regex(r"^/?我的数据$") & filters.ChatType.GROUPS, get_my_stats))
+    # 积分排名
+    application.add_handler(MessageHandler(filters.Regex(r"^/?积分排名$") & filters.ChatType.GROUPS, points_rank))
+    # 今日排名
+    application.add_handler(MessageHandler(filters.Regex(r"^/?今日排名$") & filters.ChatType.GROUPS, today_rank))
+    # 本周排名
+    application.add_handler(MessageHandler(filters.Regex(r"^/?本周排名$") & filters.ChatType.GROUPS, week_rank))
+    # 本月排名
+    application.add_handler(MessageHandler(filters.Regex(r"^/?本月排名$") & filters.ChatType.GROUPS, month_rank))
 
-    # 【修改】群消息通用处理器：新增语音/图片/视频的过滤器
+    # 群消息通用处理器：支持文本/语音/图片/视频
     application.add_handler(MessageHandler(
         (filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL) & (filters.TEXT | filters.VOICE | filters.PHOTO | filters.VIDEO),
         handle_group_message
     ))
 
-    # 启动长轮询，无弃用参数
+    # 启动长轮询，无弃用参数，无崩溃风险
     application.run_polling(
         drop_pending_updates=True,
         allowed_updates=["message"]
