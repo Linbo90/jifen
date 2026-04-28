@@ -20,7 +20,7 @@ INIT_ADMIN_USERNAME = os.getenv("INIT_ADMIN_USERNAME", "lmdoi")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 TZ = timezone(os.getenv("TZ", "Asia/Shanghai"))
 # 规则配置（也可在Railway环境变量自定义）
-VALID_MESSAGE_MIN_LENGTH = int(os.getenv("VALID_MESSAGE_MIN_LENGTH", 5))
+VALID_MESSAGE_MIN_LENGTH = int(os.getenv("VALID_MESSAGE_MIN_LENGTH", 3))
 SIGN_IN_POINTS = int(os.getenv("SIGN_IN_POINTS", 80))
 DAILY_SPEECH_TARGET = int(os.getenv("DAILY_SPEECH_TARGET", 288))
 DAILY_BONUS_POINTS = int(os.getenv("DAILY_BONUS_POINTS", 288))
@@ -28,7 +28,7 @@ WEEKLY_SPEECH_TARGET = int(os.getenv("WEEKLY_SPEECH_TARGET", 2888))
 WEEKLY_BONUS_POINTS = int(os.getenv("WEEKLY_BONUS_POINTS", 1688))
 RANK_SHOW_LIMIT = int(os.getenv("RANK_SHOW_LIMIT", 10))
 # 自动删除消息延迟时间（单位：秒，默认60秒）
-AUTO_DELETE_DELAY = 60
+AUTO_DELETE_DELAY = 180
 # ========================================================================================
 
 # 数据库初始化
