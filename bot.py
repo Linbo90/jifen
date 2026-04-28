@@ -467,18 +467,19 @@ def main():
     init_db()
     print("数据库初始化完成，机器人启动中...")
 
-    # 创建机器人应用，启用post_init钩子，确保初始化顺序正确
+    # 创建机器人应用，适配最新参数规范，消除警告
     application = (
         Application.builder()
         .token(BOT_TOKEN)
         .post_init(post_init)
+        .pool_timeout(30)
         .build()
     )
 
-    # 注册全局错误处理器（核心修复，彻底避免崩溃）
+    # 注册全局错误处理器
     application.add_error_handler(global_error_handler)
 
-    # 英文指令（符合Telegram API规范）
+    # 英文指令
     application.add_handler(CommandHandler("sign", sign_in))
     application.add_handler(CommandHandler("mystats", get_my_stats))
     application.add_handler(CommandHandler("todayrank", today_rank))
@@ -494,14 +495,13 @@ def main():
     application.add_handler(MessageHandler(filters.Regex(r"^本月排名$") & filters.ChatType.GROUPS, month_rank))
     application.add_handler(MessageHandler(filters.Regex(r"^积分排名$") & filters.ChatType.GROUPS, points_rank))
 
-    # 群消息通用处理器（必须放在最后）
+    # 群消息通用处理器
     application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, handle_group_message))
 
-    # 启动长轮询（仅保留版本兼容的参数，彻底解决参数错误）
+    # 启动长轮询，无弃用参数
     application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=["message"],
-        pool_timeout=30
+        allowed_updates=["message"]
     )
 
 if __name__ == "__main__":
