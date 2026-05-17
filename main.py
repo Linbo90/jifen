@@ -27,6 +27,7 @@ MAX_RETRY = 5  # 发送失败最大重试次数
 
 # ========= 回复联动配置 =========
 ALLOW_REPLY_WITHOUT_MAPPING = True
+
 client = TelegramClient(SESSION, API_ID, API_HASH)
 
 # ========== 优雅关闭与自重启核心状态 ==========
@@ -243,32 +244,67 @@ def pick_text_from_message(msg):
     txt = getattr(msg, "message", None) or getattr(msg, "raw_text", None) or ""
     return txt, getattr(msg, "entities", None)
 
-# ✅ 终极修复：完全不再依赖event.messages，只使用传入的完整消息列表
-def pick_caption_from_album(event, sorted_msgs=None):
+# ========== 修复：增强相册文本提取（1.42.0专属，完整保留格式）==========
+def pick_caption_from_album(sorted_msgs):
     if not sorted_msgs:
-        log("相册事件异常：无有效消息列表")
+        log("相册事件异常：无任何媒体消息")
         return "", []
     
-    main_msg = sorted_msgs[0]
+    log(f"开始提取相册文本 | 共{len(sorted_msgs)}条消息 | ID列表: {[m.id for m in sorted_msgs]}")
     
-    # 优先获取媒体caption（1.42.0相册文本标准存储位置），再兜底正文
-    txt = getattr(main_msg, "caption", None) or getattr(main_msg, "message", None) or getattr(main_msg, "text", None) or getattr(main_msg, "raw_text", None) or ""
-    # 对应获取caption的格式实体，再兜底正文实体
-    entities = getattr(main_msg, "caption_entities", None) or getattr(main_msg, "entities", None) or []
+    final_txt = ""
+    final_entities = []
     
-    log(f"相册首条消息ID:{main_msg.id} | 提取到的文本长度:{len(txt)}")
+    for idx, msg in enumerate(sorted_msgs):
+        # 1.42.0专属修复：强制获取完整消息对象，解决实体加载不完整问题
+        full_msg = msg
+        if not hasattr(msg, '_full') or not msg._full:
+            try:
+                # 同步获取完整消息，确保实体完全加载
+                full_msg = asyncio.run_coroutine_threadsafe(
+                    client.get_messages(msg.chat_id, ids=msg.id),
+                    asyncio.get_event_loop()
+                ).result()
+                log(f"✅ 强制加载完整消息 | ID:{msg.id} | 实体数:{len(full_msg.caption_entities or [])}")
+            except Exception as e:
+                log(f"⚠️  强制加载完整消息失败 | ID:{msg.id} | 错误:{e}")
+        
+        # 全面覆盖1.42.0所有可能的文本存储属性
+        txt = (
+            getattr(full_msg, "caption", None) 
+            or getattr(full_msg, "message", None) 
+            or getattr(full_msg, "text", None) 
+            or getattr(full_msg, "raw_text", None) 
+            or getattr(full_msg, "plain_text", None)
+            or ""
+        )
+        
+        # 全面覆盖1.42.0所有可能的实体存储属性
+        entities = (
+            getattr(full_msg, "caption_entities", None) 
+            or getattr(full_msg, "entities", None) 
+            or getattr(full_msg, "message_entities", None)
+            or []
+        )
+        
+        log(f"消息{idx+1}/{len(sorted_msgs)} ID:{full_msg.id} | 文本长度:{len(txt.strip())} | 实体数:{len(entities)}")
+        
+        # 优先使用第一条有有效文本且有实体的消息（保证格式完整）
+        if txt.strip() and not final_txt:
+            final_txt = txt
+            final_entities = entities
+            log(f"✅ 找到有效文本 | 消息ID:{full_msg.id} | 文本预览:{final_txt[:50]}...")
+            
+            # 如果找到文本但无实体，继续查找其他消息（可能格式在其他消息上）
+            if len(entities) == 0:
+                log(f"⚠️  该消息文本有内容但无实体，继续查找其他消息")
+                continue
+            break
     
-    if not txt.strip():
-        log("相册首条无文本，开始遍历其他消息兜底")
-        for m in sorted_msgs[1:]:
-            t = getattr(m, "caption", None) or getattr(m, "message", None) or getattr(m, "text", None) or getattr(m, "raw_text", None) or ""
-            if t.strip():
-                txt = t
-                entities = getattr(m, "caption_entities", None) or getattr(m, "entities", None) or []
-                log(f"相册兜底取到文本，消息ID:{m.id} | 文本长度:{len(txt)}")
-                break
+    if not final_txt.strip():
+        log("⚠️  相册所有消息均未提取到有效文本")
     
-    return txt, list(entities or [])
+    return final_txt, list(final_entities or [])
 
 def to_html(text: str, entities):
     if not text:
@@ -286,7 +322,7 @@ async def safe_send_single(*, target, text_html, media, reply_to=None):
     
     while retry_count < MAX_RETRY and not send_success:
         try:
-            await client.send_file(
+            sent_msg = await client.send_file(
                 target,
                 file=media,
                 caption=text_html,
@@ -306,11 +342,9 @@ async def safe_send_single(*, target, text_html, media, reply_to=None):
             log(f"❌ 单媒体转发失败，第{retry_count}次重试 | 详情：{str(e)}")
             await asyncio.sleep(3)
     
-    if send_success:
-        return await client.get_messages(target, limit=1)
-    return None
+    return sent_msg
 
-# ========= 修改：同步11.py的错误重试逻辑（相册）=========
+# ========== 修复：相册发送传递完整caption列表（1.42.0兼容）==========
 async def safe_send_album(*, target, files, captions_html, reply_to=None):
     retry_count = 0
     send_success = False
@@ -318,10 +352,10 @@ async def safe_send_album(*, target, files, captions_html, reply_to=None):
     
     while retry_count < MAX_RETRY and not send_success:
         try:
-            await client.send_file(
+            sent_msg = await client.send_file(
                 target,
                 file=files,
-                caption=captions_html[0],
+                caption=captions_html,  # 修复：传递完整caption列表，而非仅第一个
                 parse_mode="html",
                 link_preview=False,
                 reply_to=reply_to,
@@ -342,9 +376,7 @@ async def safe_send_album(*, target, files, captions_html, reply_to=None):
             log(f"❌ 相册转发失败，第{retry_count}次重试 | 详情：{str(e)}")
             await asyncio.sleep(3)
     
-    if send_success:
-        return await client.get_messages(target, limit=1)
-    return None
+    return sent_msg
 
 async def message_handler(event):
     try:
@@ -402,7 +434,6 @@ async def message_handler(event):
         )
         
         if sent_msg:
-            sent_msg = sent_msg[0]
             await save_message_mapping(
                 source_channel_id=source_channel_id,
                 source_msg_id=msg.id,
@@ -415,34 +446,58 @@ async def message_handler(event):
     except Exception as e:
         log(f"消息处理错误: {e}")
 
-# ✅ 终极修复：所有问题都已解决的album_handler
+# ========== 修复：重写相册事件处理逻辑（解决消息不完整问题）==========
 async def album_handler(event):
     try:
-         await asyncio.sleep(5)
-         
-         # ✅ 完美兼容所有Telethon版本的消息ID获取方式
-         if hasattr(event, 'message_ids'):
-             # 新版本：直接使用message_ids属性
-             msg_ids = event.message_ids
-         else:
-             # 旧版本：从messages中提取ID
-             msg_ids = [m.id for m in event.messages]
-         
-         # 绕过所有缓存，直接从服务器拉取完整消息
-         msgs = await client.get_messages(event.chat_id, ids=msg_ids)
-         # 自动过滤None值，避免崩溃
-         sorted_msgs = sorted(
-             [m for m in msgs if m is not None],
-             key=lambda m: m.id
-         )
+        # 缩短初始等待，改为动态重试获取完整消息
+        await asyncio.sleep(2)
         
+        # ========== 核心修复：通过grouped_id重新获取完整相册 ==========
+        grouped_id = event.grouped_id
         source_channel_id = event.chat_id
+        all_msgs = []
+        
+        # 重试3次获取完整相册，解决Telethon分批次触发事件的问题
+        for retry in range(3):
+            try:
+                # 获取最近100条消息，筛选相同grouped_id的所有消息
+                recent_msgs = await client.get_messages(source_channel_id, limit=100)
+                all_msgs = [m for m in recent_msgs if m.grouped_id == grouped_id]
+                
+                if len(all_msgs) > 0:
+                    log(f"✅ 第{retry+1}次获取成功，完整相册共{len(all_msgs)}条消息 | grouped_id={grouped_id}")
+                    break
+                    
+                log(f"⚠️  第{retry+1}次获取相册为空，等待2秒后重试")
+                await asyncio.sleep(2)
+            except Exception as e:
+                log(f"❌ 第{retry+1}次获取相册失败: {e}")
+                await asyncio.sleep(2)
+        
+        # 兜底：如果3次都失败，使用事件自带的消息列表
+        if len(all_msgs) == 0:
+            log("⚠️  无法获取完整相册，使用事件自带消息列表")
+            all_msgs = event.messages
+        
+        # 按消息ID严格排序，确保与原相册顺序一致
+        sorted_msgs = sorted(all_msgs, key=lambda m: m.id)
+        
+        # ========== 新增：预加载所有消息的完整内容 ==========
+        # 解决部分消息文本和实体未完全下载的问题
+        for i in range(len(sorted_msgs)):
+            try:
+                full_msg = await client.get_messages(source_channel_id, ids=sorted_msgs[i].id)
+                if full_msg:
+                    sorted_msgs[i] = full_msg
+            except Exception as e:
+                log(f"⚠️  预加载消息{sorted_msgs[i].id}失败: {e}")
+        
+        # 以下保持原有逻辑不变
         target_entity = CHANNEL_MAP.get(source_channel_id)
         if not target_entity:
             log(f"拦截: 未找到该频道的目标映射 | 频道ID: {source_channel_id}")
             return
         
-        # 只遍历过滤后的有效消息，避免None导致崩溃
         if any(is_forwarded_msg(m) for m in sorted_msgs):
             log("拦截: 其他地方转发的相册消息")
             return
@@ -453,12 +508,10 @@ async def album_handler(event):
             log(f"⏭️  已跳过 | 原首条消息ID: {first.id} | 同一条相册已转发")
             return
         
-        # 只遍历过滤后的有效消息，避免None导致崩溃
         btn_count = sum(count_buttons(m) for m in sorted_msgs)
-        text, entities = pick_caption_from_album(event, sorted_msgs)
-        # 日志显示正确的有效消息数
+        # 调用修复后的文本提取函数
+        text, entities = pick_caption_from_album(sorted_msgs)
         log(f"收到相册 | 原相册媒体数:{len(sorted_msgs)} | 最终提取文本长度:{len(text)} | 按钮:{btn_count}")
-        
         if has_paid_ad(text):
             log("拦截: 含付费广告")
             return
@@ -506,7 +559,6 @@ async def album_handler(event):
         )
         
         if sent_msg:
-            sent_msg = sent_msg[0]
             await save_message_mapping(
                 source_channel_id=source_channel_id,
                 source_msg_id=first.id,
