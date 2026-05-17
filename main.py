@@ -418,18 +418,23 @@ async def message_handler(event):
 # ✅ 终极修复：所有问题都已解决的album_handler
 async def album_handler(event):
     try:
-        await asyncio.sleep(5)
-        
-        # 绕过所有缓存，直接从服务器拉取完整消息
-        msgs = await client.get_messages(
-            event.chat_id,
-            ids=event.message_ids
-        )
-        # 自动过滤None值，避免崩溃
-        sorted_msgs = sorted(
-            [m for m in msgs if m is not None],
-            key=lambda m: m.id
-        )
+         await asyncio.sleep(5)
+         
+         # ✅ 完美兼容所有Telethon版本的消息ID获取方式
+         if hasattr(event, 'message_ids'):
+             # 新版本：直接使用message_ids属性
+             msg_ids = event.message_ids
+         else:
+             # 旧版本：从messages中提取ID
+             msg_ids = [m.id for m in event.messages]
+         
+         # 绕过所有缓存，直接从服务器拉取完整消息
+         msgs = await client.get_messages(event.chat_id, ids=msg_ids)
+         # 自动过滤None值，避免崩溃
+         sorted_msgs = sorted(
+             [m for m in msgs if m is not None],
+             key=lambda m: m.id
+         )
         
         source_channel_id = event.chat_id
         target_entity = CHANNEL_MAP.get(source_channel_id)
