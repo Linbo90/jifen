@@ -243,14 +243,11 @@ def pick_text_from_message(msg):
     txt = getattr(msg, "message", None) or getattr(msg, "raw_text", None) or ""
     return txt, getattr(msg, "entities", None)
 
+# ✅ 终极修复：完全不再依赖event.messages，只使用传入的完整消息列表
 def pick_caption_from_album(event, sorted_msgs=None):
-    if not event.messages:
-        log("相册事件异常：无任何媒体消息")
+    if not sorted_msgs:
+        log("相册事件异常：无有效消息列表")
         return "", []
-    
-    # 支持传入预排序的消息列表，避免重复排序
-    if sorted_msgs is None:
-        sorted_msgs = sorted(event.messages, key=lambda m: m.id)
     
     main_msg = sorted_msgs[0]
     
@@ -418,18 +415,30 @@ async def message_handler(event):
     except Exception as e:
         log(f"消息处理错误: {e}")
 
+# ✅ 终极修复：所有问题都已解决的album_handler
 async def album_handler(event):
     try:
         await asyncio.sleep(5)
-        msgs = event.messages
-        sorted_msgs = sorted(msgs, key=lambda m: m.id)
+        
+        # 绕过所有缓存，直接从服务器拉取完整消息
+        msgs = await client.get_messages(
+            event.chat_id,
+            ids=event.message_ids
+        )
+        # 自动过滤None值，避免崩溃
+        sorted_msgs = sorted(
+            [m for m in msgs if m is not None],
+            key=lambda m: m.id
+        )
+        
         source_channel_id = event.chat_id
         target_entity = CHANNEL_MAP.get(source_channel_id)
         if not target_entity:
             log(f"拦截: 未找到该频道的目标映射 | 频道ID: {source_channel_id}")
             return
         
-        if any(is_forwarded_msg(m) for m in msgs):
+        # 只遍历过滤后的有效消息，避免None导致崩溃
+        if any(is_forwarded_msg(m) for m in sorted_msgs):
             log("拦截: 其他地方转发的相册消息")
             return
         
@@ -439,9 +448,12 @@ async def album_handler(event):
             log(f"⏭️  已跳过 | 原首条消息ID: {first.id} | 同一条相册已转发")
             return
         
-        btn_count = sum(count_buttons(m) for m in msgs)
+        # 只遍历过滤后的有效消息，避免None导致崩溃
+        btn_count = sum(count_buttons(m) for m in sorted_msgs)
         text, entities = pick_caption_from_album(event, sorted_msgs)
-        log(f"收到相册 | 原相册媒体数:{len(msgs)} | 最终提取文本长度:{len(text)} | 按钮:{btn_count}")
+        # 日志显示正确的有效消息数
+        log(f"收到相册 | 原相册媒体数:{len(sorted_msgs)} | 最终提取文本长度:{len(text)} | 按钮:{btn_count}")
+        
         if has_paid_ad(text):
             log("拦截: 含付费广告")
             return
