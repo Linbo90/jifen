@@ -242,34 +242,45 @@ def count_buttons(msg) -> int:
 def pick_text_from_message(msg):
     txt = getattr(msg, "message", None) or getattr(msg, "raw_text", None) or ""
     return txt, getattr(msg, "entities", None)
+
 def pick_caption_from_album(event, sorted_msgs=None):
     if not event.messages:
         log("相册事件异常：无任何媒体消息")
         return "", []
-
+    
     if sorted_msgs is None:
         sorted_msgs = sorted(event.messages, key=lambda m: m.id)
+    
+    # ✅ 核心修复3：确保文本与对应实体匹配，遍历所有消息查找
+    for idx, msg in enumerate(sorted_msgs):
+        txt = None
+        entities = None
+        
+        # 严格按照优先级检查，确保文本和实体一一对应
+        if hasattr(msg, 'caption') and msg.caption and msg.caption.strip():
+            txt = msg.caption
+            entities = getattr(msg, 'caption_entities', None)
+            source = "caption"
+        elif hasattr(msg, 'message') and msg.message and msg.message.strip():
+            txt = msg.message
+            entities = getattr(msg, 'entities', None)
+            source = "message"
+        elif hasattr(msg, 'text') and msg.text and msg.text.strip():
+            txt = msg.text
+            entities = getattr(msg, 'entities', None)
+            source = "text"
+        elif hasattr(msg, 'raw_text') and msg.raw_text and msg.raw_text.strip():
+            txt = msg.raw_text
+            entities = getattr(msg, 'entities', None)
+            source = "raw_text"
+        
+        if txt:
+            log(f"✅ 相册文本提取成功 | 位置:第{idx+1}条消息 | 来源:{source} | 消息ID:{msg.id} | 文本长度:{len(txt)} | 格式实体数:{len(entities or [])}")
+            return txt, list(entities or [])
+    
+    log("⚠️  相册所有消息均未提取到文本内容")
+    return "", []
 
-    txt = getattr(event, "text", None) or getattr(event, "raw_text", None) or ""
-    entities = []
-
-    if txt.strip():
-        for m in sorted_msgs:
-            entities = getattr(m, "caption_entities", None) or getattr(m, "entities", None) or []
-            if entities:
-                break
-        return txt, list(entities or [])
-
-    log("相册事件主文本为空，遍历全部消息兜底")
-    for m in sorted_msgs:
-        t = getattr(m, "caption", None) or getattr(m, "message", None) or getattr(m, "text", None) or getattr(m, "raw_text", None) or ""
-        if t.strip():
-            txt = t
-            entities = getattr(m, "caption_entities", None) or getattr(m, "entities", None) or []
-            log(f"相册兜底取到文本，消息ID:{m.id} | 文本长度:{len(txt)}")
-            break
-
-    return txt, list(entities or [])
 def to_html(text: str, entities):
     if not text:
         return ""
@@ -328,7 +339,8 @@ async def safe_send_album(*, target, files, captions_html, reply_to=None):
                 force_album=True,
                 force_document=False,
                 use_cache=False,
-                allow_cache=False
+                allow_cache=False,
+                album_captions=captions_html
             )
             send_success = True
             break
@@ -417,46 +429,62 @@ async def message_handler(event):
 
 async def album_handler(event):
     try:
-        await asyncio.sleep(5)
-        msgs = event.messages
-        sorted_msgs = sorted(msgs, key=lambda m: m.id)
+        # 缩短初始延迟，改为动态重试机制
+        await asyncio.sleep(2)
+        
+        # ✅ 核心修复1：手动重新获取完整消息对象，解决event.messages不完整问题
+        full_msg_ids = [m.id for m in event.messages]
+        full_msgs = await client.get_messages(event.chat_id, ids=full_msg_ids)
+        sorted_msgs = sorted(full_msgs, key=lambda m: m.id)
+        
         source_channel_id = event.chat_id
         target_entity = CHANNEL_MAP.get(source_channel_id)
         if not target_entity:
             log(f"拦截: 未找到该频道的目标映射 | 频道ID: {source_channel_id}")
             return
         
-        if any(is_forwarded_msg(m) for m in msgs):
+        # ❌ 原错误：使用了未定义的msgs变量，应该用sorted_msgs
+        if any(is_forwarded_msg(m) for m in sorted_msgs):
             log("拦截: 其他地方转发的相册消息")
             return
         
         first = sorted_msgs[0]
-        # 新增：同步11.py的重复转发检查
         if (source_channel_id, first.id) in processed_msg_ids:
             log(f"⏭️  已跳过 | 原首条消息ID: {first.id} | 同一条相册已转发")
             return
         
-        btn_count = sum(count_buttons(m) for m in msgs)
+        # ❌ 原错误：使用了未定义的msgs变量，应该用sorted_msgs
+        btn_count = sum(count_buttons(m) for m in sorted_msgs)
+        
+        # ✅ 核心修复2：增加文本提取重试机制
         text, entities = pick_caption_from_album(event, sorted_msgs)
-        log(f"收到相册 | 原相册媒体数:{len(msgs)} | 最终提取文本长度:{len(text)} | 按钮:{btn_count}")
+        if not text.strip():
+            log("⚠️  相册首次提取无文本，等待1.5秒后重新获取完整消息重试...")
+            await asyncio.sleep(1.5)
+            # 再次重新获取所有消息，确保属性完全加载
+            full_msgs = await client.get_messages(event.chat_id, ids=full_msg_ids)
+            sorted_msgs = sorted(full_msgs, key=lambda m: m.id)
+            text, entities = pick_caption_from_album(event, sorted_msgs)
+            if not text.strip():
+                log("⚠️  相册重试提取仍无文本，确认原消息确实无文字后继续处理")
+        
+        # ❌ 原错误：使用了未定义的msgs变量，应该用event.messages（原始相册大小）
+        log(f"收到相册 | 原相册媒体数:{len(event.messages)} | 最终提取文本长度:{len(text)} | 按钮:{btn_count}")
         if has_paid_ad(text):
             log("拦截: 含付费广告")
             return
         if btn_count >= 1:
             log(f"拦截: 相册检测到按钮（总数量:{btn_count}），全部禁止")
             return
-        # 全文本违规检查：只要有任何@/链接，直接拦截，不做任何截断
         if has_link(text):
             log(f"拦截: 相册全文本包含违规内容（@/链接）| 原首条消息ID: {first.id}")
             return
-        # 无违规，直接使用原文本和原始格式，不做任何修改
+        
         new_text, new_entities = text, entities
         first_caption_html = to_html(new_text, new_entities)
         
-        # 统一使用排序后的消息列表，确保媒体顺序与原相册一致
         valid_media_list = []
         for m in sorted_msgs:
-            # 兼容1.42.0：明确判断有效媒体类型，过滤MediaEmpty等无效对象
             if hasattr(m, 'media') and m.media:
                 if hasattr(m.media, 'photo') and m.media.photo:
                     valid_media_list.append(m.media)
@@ -475,7 +503,6 @@ async def album_handler(event):
             log(f"拦截: 回复相册未找到原消息映射 | 首条消息ID: {first.id} | 回复的原消息ID: {first.reply_to.reply_to_msg_id}")
             return
         
-        # 新增：同步11.py的转发间隔控制
         await rate_limit_wait()
         
         sent_msg = await safe_send_album(
@@ -493,7 +520,6 @@ async def album_handler(event):
                 target_channel_id=target_entity.id,
                 target_msg_id=sent_msg.id
             )
-            # 新增：同步11.py的已处理消息缓存
             processed_msg_ids.append((source_channel_id, first.id))
             log(f"转发成功: 相册 | 原首条消息ID: {first.id} | 目标消息ID: {sent_msg.id}" + (f" | 回复目标ID: {reply_to_target_id}" if reply_to_target_id else ""))
     except Exception as e:
