@@ -27,6 +27,7 @@ MAX_RETRY = 5  # 发送失败最大重试次数
 
 # ========= 回复联动配置 =========
 ALLOW_REPLY_WITHOUT_MAPPING = True
+
 client = TelegramClient(SESSION, API_ID, API_HASH)
 
 # ========== 优雅关闭与自重启核心状态 ==========
@@ -46,6 +47,11 @@ DB_LOCK = asyncio.Lock()  # 数据库操作锁，防止并发冲突
 processed_msg_ids = deque(maxlen=MAX_CACHE_SIZE)  # 已处理消息ID缓存，自动淘汰旧数据
 forward_lock = asyncio.Lock()  # 转发限流锁
 last_forward_time = 0  # 上次转发时间戳
+
+# ========= 新增：相册合并全局缓存（终极修复相册拆分） =========
+pending_albums = {}  # key: f"{channel_id}|{grouped_id}", value: {"messages": [], "last_update": timestamp, "processed": False}
+ALBUM_MERGE_WINDOW = 10  # 相册合并窗口（秒），确保所有图片到达
+ALBUM_CLEANUP_INTERVAL = 60  # 过期相册清理间隔（秒）
 
 # ========= 日志 =========
 def log(msg: str):
@@ -102,6 +108,27 @@ async def keep_alive():
             log(f"⚠️  连接保活失败，准备重启: {str(e)}")
             stop_event.set()
             break
+
+# ========= 新增：过期相册清理任务 =========
+async def album_cleanup():
+    """定期清理过期的未处理相册缓存，防止内存泄漏"""
+    while True:
+        await asyncio.sleep(ALBUM_CLEANUP_INTERVAL)
+        try:
+            now = time.time()
+            expired_keys = []
+            for key, album in pending_albums.items():
+                if now - album["last_update"] > ALBUM_MERGE_WINDOW * 2 and not album["processed"]:
+                    expired_keys.append(key)
+            
+            for key in expired_keys:
+                pending_albums.pop(key, None)
+                log(f"🧹 清理过期未处理相册 | key:{key}")
+            
+            if expired_keys:
+                log(f"✅ 相册缓存清理完成 | 清理了{len(expired_keys)}个过期相册")
+        except Exception as e:
+            log(f"⚠️  相册清理出错: {str(e)}")
 
 # ========= 新增：同步11.py的限流控制函数 =========
 async def rate_limit_wait():
@@ -376,8 +403,8 @@ async def message_handler(event):
         
         # ✅ 新增：兜底检测延迟到达的相册消息
         if hasattr(event.message, 'grouped_id') and event.message.grouped_id:
-            log(f"⏳ 检测到延迟到达的相册消息，等待5秒后由相册处理器处理 | 消息ID:{event.message.id}")
-            await asyncio.sleep(5)
+            log(f"⏳ 检测到延迟到达的相册消息，等待{ALBUM_MERGE_WINDOW}秒后由相册处理器处理 | 消息ID:{event.message.id}")
+            await asyncio.sleep(ALBUM_MERGE_WINDOW)
             return
         
         msg = event.message
@@ -407,10 +434,11 @@ async def message_handler(event):
         if btn_count >= 1:
             log(f"拦截: 检测到按钮（数量:{btn_count}），全部禁止")
             return
+        # 全文本违规检查：只要有任何@/链接，直接拦截，不做任何截断
         if has_link(text):
             log(f"拦截: 全文本包含违规内容（@/链接）| 原消息ID: {msg.id}")
             return
-        
+        # 无违规，直接使用原文本和原始格式，不做任何修改
         new_text, new_entities = text, entities
         text_html = to_html(new_text, new_entities)
         
@@ -419,6 +447,7 @@ async def message_handler(event):
             log(f"拦截: 回复消息未找到原消息映射 | 消息ID: {msg.id} | 回复的原消息ID: {msg.reply_to.reply_to_msg_id}")
             return
         
+        # 新增：同步11.py的转发间隔控制
         await rate_limit_wait()
         
         sent_msg = await safe_send_single(
@@ -436,17 +465,56 @@ async def message_handler(event):
                 target_channel_id=target_entity.id,
                 target_msg_id=sent_msg.id
             )
+            # 新增：同步11.py的已处理消息缓存
             processed_msg_ids.append((source_channel_id, msg.id))
             log(f"转发成功: 单条消息 | 原消息ID: {msg.id} | 目标消息ID: {sent_msg.id}" + (f" | 回复目标ID: {reply_to_target_id}" if reply_to_target_id else ""))
     except Exception as e:
         log(f"消息处理错误: {e}")
 
+# ========= 【终极修复】相册合并处理器 =========
 async def album_handler(event):
     try:
-        await asyncio.sleep(5)
-        msgs = event.messages
-        sorted_msgs = sorted(msgs, key=lambda m: m.id)
+        grouped_id = event.grouped_id
         source_channel_id = event.chat_id
+        cache_key = f"{source_channel_id}|{grouped_id}"
+        
+        # 1. 检查是否已经处理过这个相册
+        if cache_key in pending_albums and pending_albums[cache_key]["processed"]:
+            log(f"⏭️  已跳过 | 相册{grouped_id}已处理完成")
+            return
+        
+        # 2. 合并同grouped_id的所有消息片段
+        if cache_key in pending_albums:
+            # 合并新收到的消息
+            pending_albums[cache_key]["messages"].extend(event.messages)
+            pending_albums[cache_key]["last_update"] = time.time()
+            log(f"🧩 合并相册片段 | grouped_id:{grouped_id} | 新增{len(event.messages)}张 | 当前总消息数:{len(pending_albums[cache_key]['messages'])}")
+            return
+        
+        # 3. 新相册，加入缓存等待合并
+        pending_albums[cache_key] = {
+            "messages": event.messages,
+            "last_update": time.time(),
+            "processed": False
+        }
+        log(f"📥 收到新相册 | grouped_id:{grouped_id} | 初始消息数:{len(event.messages)} | 等待{ALBUM_MERGE_WINDOW}秒合并窗口")
+        
+        # 4. 等待合并窗口结束，确保所有图片都到达
+        await asyncio.sleep(ALBUM_MERGE_WINDOW)
+        
+        # 5. 取出最终合并后的完整相册
+        final_album = pending_albums.get(cache_key)
+        if not final_album or final_album["processed"]:
+            return
+        
+        # 标记为已处理，防止重复处理
+        final_album["processed"] = True
+        
+        msgs = final_album["messages"]
+        sorted_msgs = sorted(msgs, key=lambda m: m.id)
+        log(f"✅ 相册合并完成 | grouped_id:{grouped_id} | 最终总消息数:{len(sorted_msgs)}")
+        
+        # 6. 原有业务逻辑（完全不变）
         target_entity = CHANNEL_MAP.get(source_channel_id)
         if not target_entity:
             log(f"拦截: 未找到该频道的目标映射 | 频道ID: {source_channel_id}")
@@ -457,7 +525,6 @@ async def album_handler(event):
             return
         
         first = sorted_msgs[0]
-        # 新增：同步11.py的重复转发检查
         if (source_channel_id, first.id) in processed_msg_ids:
             log(f"⏭️  已跳过 | 原首条消息ID: {first.id} | 同一条相册已转发")
             return
@@ -522,6 +589,7 @@ async def album_handler(event):
             # 新增：同步11.py的已处理消息缓存
             processed_msg_ids.append((source_channel_id, first.id))
             log(f"转发成功: 相册 | 原首条消息ID: {first.id} | 目标消息ID: {sent_msg.id}" + (f" | 回复目标ID: {reply_to_target_id}" if reply_to_target_id else ""))
+    
     except Exception as e:
         log(f"相册处理错误: {e}")
 
@@ -590,7 +658,9 @@ async def main():
     track_task(asyncio.create_task(stop_watcher()))
     restart_task = asyncio.create_task(auto_restart())
     track_task(restart_task)
-    track_task(asyncio.create_task(keep_alive()))  # ✅ 新增这一行，启动连接保活
+    track_task(asyncio.create_task(keep_alive()))
+    track_task(asyncio.create_task(album_cleanup()))  # 启动相册清理任务
+    
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
