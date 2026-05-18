@@ -332,7 +332,7 @@ async def safe_send_album(*, target, files, captions_html, reply_to=None):
             await client.send_file(
                 target,
                 file=files,
-                caption=captions_html[0],
+                caption=captions_html,
                 parse_mode="html",
                 link_preview=False,
                 reply_to=reply_to,
@@ -340,7 +340,6 @@ async def safe_send_album(*, target, files, captions_html, reply_to=None):
                 force_document=False,
                 use_cache=False,
                 allow_cache=False,
-                album_captions=captions_html
             )
             send_success = True
             break
