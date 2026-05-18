@@ -11,7 +11,6 @@ from telethon.errors import FloodWaitError
 from telethon.extensions import html as tl_html
 import psycopg2
 from psycopg2.extras import DictCursor
-
 # ========= 配置（全部改为环境变量，Railway 后台设置）=========
 API_ID = int(os.getenv("API_ID", "25559912"))
 API_HASH = os.getenv("API_HASH", "22d3bb9665ad7e6a86e89c1445672e07")
@@ -19,45 +18,36 @@ SESSION = os.getenv("SESSION", "session")
 RESTART_TIME = int(os.getenv("RESTART_TIME", "43200"))  # 12小时
 TAIL_TEXT = os.getenv("TAIL_TEXT", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-
 # ========= 新增：同步11.py的稳定性配置 =========
 MAX_CACHE_SIZE = 2000  # 已处理消息ID缓存上限
 FORWARD_INTERVAL = 8  # 转发间隔（秒），降低限流风险
 MAX_RETRY = 5  # 发送失败最大重试次数
-
 # ========= 回复联动配置 =========
 ALLOW_REPLY_WITHOUT_MAPPING = True
-
 client = TelegramClient(SESSION, API_ID, API_HASH)
-
 # ========== 优雅关闭与自重启核心状态 ==========
 stop_event = Event()
 shutdown_lock = Lock()
 is_shutting_down = False
 is_restarting = False  # 防重复重启标记
 active_tasks = set()
-
 # ========= 全局缓存 =========
 CHANNEL_MAP = {}
 SOURCE_ENTITY_CACHE = {}
 MESSAGE_ID_MAP = {}  # 回复映射依然保留数据库持久化，内存仅做缓存
 DB_LOCK = asyncio.Lock()  # 数据库操作锁，防止并发冲突
-
 # ========= 新增：同步11.py的内存管理与限流状态 =========
 processed_msg_ids = deque(maxlen=MAX_CACHE_SIZE)  # 已处理消息ID缓存，自动淘汰旧数据
 forward_lock = asyncio.Lock()  # 转发限流锁
 last_forward_time = 0  # 上次转发时间戳
-
 # ========= 日志 =========
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-
 # ========== 自重启与优雅关闭工具函数 ==========
 def track_task(task):
     """跟踪活跃协程任务，优雅关闭时等待完成"""
     active_tasks.add(task)
     task.add_done_callback(active_tasks.discard)
-
 def restart_program():
     """进程内无缝自重启，PID不变，不依赖外部平台"""
     global is_restarting
@@ -67,7 +57,6 @@ def restart_program():
     log("🔄 开始执行进程内自重启...")
     python = sys.executable
     os.execv(python, [python] + sys.argv)  # 替换当前进程镜像
-
 async def graceful_shutdown():
     """终极修复：彻底删除任务等待与取消逻辑，直接断开连接重启，根除死锁和无限递归"""
     global is_shutting_down
@@ -86,12 +75,10 @@ async def graceful_shutdown():
         log(f"⚠️  断开连接时出错：{str(e)}，强制执行自重启")
     
     restart_program()
-
 async def stop_watcher():
     """监听停止事件，触发优雅关闭"""
     await stop_event.wait()
     await graceful_shutdown()
-
 # ========= 新增：同步11.py的限流控制函数 =========
 async def rate_limit_wait():
     """转发间隔控制，主动降低限流风险"""
@@ -102,7 +89,6 @@ async def rate_limit_wait():
         if wait_time > 0:
             await asyncio.sleep(wait_time)
         last_forward_time = time.time()
-
 # ========= 数据库初始化 =========
 def init_db_sync():
     """同步数据库初始化，启动时执行一次"""
@@ -144,13 +130,11 @@ def init_db_sync():
     conn.commit()
     conn.close()
     log("数据库初始化完成")
-
 # ========= 数据库操作封装 =========
 async def db_execute(query: str, params: tuple = (), fetch: bool = False):
     """异步执行SQL，自动处理连接和锁"""
     async with DB_LOCK:
         return await asyncio.to_thread(_db_execute_sync, query, params, fetch)
-
 def _db_execute_sync(query: str, params: tuple, fetch: bool):
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor(cursor_factory=DictCursor)
@@ -161,7 +145,6 @@ def _db_execute_sync(query: str, params: tuple, fetch: bool):
     conn.commit()
     conn.close()
     return result
-
 # ========= 配置加载 =========
 async def load_channel_config() -> dict:
     """从数据库加载频道配置"""
@@ -175,7 +158,6 @@ async def load_channel_config() -> dict:
         config_map[source] = target
     log(f"频道配置加载完成，共加载 {len(config_map)} 组频道映射")
     return config_map
-
 # ========= 消息映射持久化（完全保留原数据库逻辑，未修改）=========
 async def load_message_mapping():
     """启动时加载历史消息ID映射到内存缓存"""
@@ -189,7 +171,6 @@ async def load_message_mapping():
         map_value = f"{row['target_channel_id']}|{row['target_msg_id']}"
         MESSAGE_ID_MAP[map_key] = map_value
     log(f"消息映射加载完成，共加载 {len(MESSAGE_ID_MAP)} 条历史消息映射")
-
 async def save_message_mapping(source_channel_id: int, source_msg_id: int, target_channel_id: int, target_msg_id: int):
     """保存消息ID映射到数据库，同时更新内存缓存"""
     map_key = f"{source_channel_id}|{source_msg_id}"
@@ -202,7 +183,6 @@ async def save_message_mapping(source_channel_id: int, source_msg_id: int, targe
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (source_channel_id, source_msg_id) DO NOTHING
     ''', (source_channel_id, source_msg_id, target_channel_id, target_msg_id))
-
 # ========= 回复目标ID获取（完全保留原数据库逻辑，未修改）=========
 def get_reply_target_id(source_channel_id: int, msg) -> int | None:
     if not hasattr(msg, "reply_to") or not msg.reply_to:
@@ -216,20 +196,16 @@ def get_reply_target_id(source_channel_id: int, msg) -> int | None:
         return None
     _, target_msg_id = target_map_value.split("|")
     return int(target_msg_id)
-
 # ========= 业务逻辑函数 =========
 def has_link(text: str) -> bool:
     if not text:
         return False
     # 匹配@、http://、https://、t.me 任意一种
     return bool(re.search(r"(@|https?://|t\.me)", text, re.IGNORECASE))
-
 def has_paid_ad(text: str) -> bool:
     return bool(text and "付费广告" in text)
-
 def is_forwarded_msg(msg) -> bool:
     return bool(getattr(msg, "fwd_from", None))
-
 def count_buttons(msg) -> int:
     if not msg:
         return 0
@@ -239,16 +215,18 @@ def count_buttons(msg) -> int:
     if getattr(msg, "buttons", None):
         return sum(len(row) for row in msg.buttons)
     return 0
-
 def pick_text_from_message(msg):
     txt = getattr(msg, "message", None) or getattr(msg, "raw_text", None) or ""
     return txt, getattr(msg, "entities", None)
-
-# ========== 修复：增强相册文本提取（1.42.0专属，完整保留格式）==========
-def pick_caption_from_album(sorted_msgs):
-    if not sorted_msgs:
+# ========== 唯一修改：增强相册文本提取（1.42.0专属，完整保留格式）==========
+def pick_caption_from_album(event, sorted_msgs=None):
+    if not event.messages:
         log("相册事件异常：无任何媒体消息")
         return "", []
+    
+    # 完全保留原始参数和排序逻辑
+    if sorted_msgs is None:
+        sorted_msgs = sorted(event.messages, key=lambda m: m.id)
     
     log(f"开始提取相册文本 | 共{len(sorted_msgs)}条消息 | ID列表: {[m.id for m in sorted_msgs]}")
     
@@ -256,48 +234,35 @@ def pick_caption_from_album(sorted_msgs):
     final_entities = []
     
     for idx, msg in enumerate(sorted_msgs):
-        # 1.42.0专属修复：强制获取完整消息对象，解决实体加载不完整问题
-        full_msg = msg
-        if not hasattr(msg, '_full') or not msg._full:
-            try:
-                # 同步获取完整消息，确保实体完全加载
-                full_msg = asyncio.run_coroutine_threadsafe(
-                    client.get_messages(msg.chat_id, ids=msg.id),
-                    asyncio.get_event_loop()
-                ).result()
-                log(f"✅ 强制加载完整消息 | ID:{msg.id} | 实体数:{len(full_msg.caption_entities or [])}")
-            except Exception as e:
-                log(f"⚠️  强制加载完整消息失败 | ID:{msg.id} | 错误:{e}")
-        
-        # 全面覆盖1.42.0所有可能的文本存储属性
+        # 1.42.0专属：全面覆盖所有可能的文本存储属性
         txt = (
-            getattr(full_msg, "caption", None) 
-            or getattr(full_msg, "message", None) 
-            or getattr(full_msg, "text", None) 
-            or getattr(full_msg, "raw_text", None) 
-            or getattr(full_msg, "plain_text", None)
+            getattr(msg, "caption", None) 
+            or getattr(msg, "message", None) 
+            or getattr(msg, "text", None) 
+            or getattr(msg, "raw_text", None) 
+            or getattr(msg, "plain_text", None)  # 新增：1.42.0官方纯文本属性
             or ""
         )
         
-        # 全面覆盖1.42.0所有可能的实体存储属性
+        # 1.42.0专属：全面覆盖所有可能的格式实体存储属性
         entities = (
-            getattr(full_msg, "caption_entities", None) 
-            or getattr(full_msg, "entities", None) 
-            or getattr(full_msg, "message_entities", None)
+            getattr(msg, "caption_entities", None) 
+            or getattr(msg, "entities", None) 
+            or getattr(msg, "message_entities", None)  # 新增：1.42.0实体备用存储位置
             or []
         )
         
-        log(f"消息{idx+1}/{len(sorted_msgs)} ID:{full_msg.id} | 文本长度:{len(txt.strip())} | 实体数:{len(entities)}")
+        log(f"消息{idx+1}/{len(sorted_msgs)} ID:{msg.id} | 文本长度:{len(txt.strip())} | 格式实体数:{len(entities)}")
         
-        # 优先使用第一条有有效文本且有实体的消息（保证格式完整）
+        # 优先使用第一条有有效文本的消息
         if txt.strip() and not final_txt:
             final_txt = txt
             final_entities = entities
-            log(f"✅ 找到有效文本 | 消息ID:{full_msg.id} | 文本预览:{final_txt[:50]}...")
+            log(f"✅ 找到有效文本 | 消息ID:{msg.id} | 文本预览:{final_txt[:50]}...")
             
-            # 如果找到文本但无实体，继续查找其他消息（可能格式在其他消息上）
+            # 优化：如果找到文本但无实体，继续查找（可能格式在同相册其他消息上）
             if len(entities) == 0:
-                log(f"⚠️  该消息文本有内容但无实体，继续查找其他消息")
+                log(f"⚠️  该消息有文本但无格式实体，继续查找其他消息")
                 continue
             break
     
@@ -305,7 +270,6 @@ def pick_caption_from_album(sorted_msgs):
         log("⚠️  相册所有消息均未提取到有效文本")
     
     return final_txt, list(final_entities or [])
-
 def to_html(text: str, entities):
     if not text:
         return ""
@@ -313,7 +277,6 @@ def to_html(text: str, entities):
         return tl_html.unparse(text, entities or [])
     except Exception:
         return text
-
 # ========= 修改：同步11.py的错误重试逻辑（单条消息）=========
 async def safe_send_single(*, target, text_html, media, reply_to=None):
     retry_count = 0
@@ -322,7 +285,7 @@ async def safe_send_single(*, target, text_html, media, reply_to=None):
     
     while retry_count < MAX_RETRY and not send_success:
         try:
-            sent_msg = await client.send_file(
+            await client.send_file(
                 target,
                 file=media,
                 caption=text_html,
@@ -342,9 +305,10 @@ async def safe_send_single(*, target, text_html, media, reply_to=None):
             log(f"❌ 单媒体转发失败，第{retry_count}次重试 | 详情：{str(e)}")
             await asyncio.sleep(3)
     
-    return sent_msg
-
-# ========== 修复：相册发送传递完整caption列表（1.42.0兼容）==========
+    if send_success:
+        return await client.get_messages(target, limit=1)
+    return None
+# ========= 修改：同步11.py的错误重试逻辑（相册）=========
 async def safe_send_album(*, target, files, captions_html, reply_to=None):
     retry_count = 0
     send_success = False
@@ -352,10 +316,10 @@ async def safe_send_album(*, target, files, captions_html, reply_to=None):
     
     while retry_count < MAX_RETRY and not send_success:
         try:
-            sent_msg = await client.send_file(
+            await client.send_file(
                 target,
                 file=files,
-                caption=captions_html,  # 修复：传递完整caption列表，而非仅第一个
+                caption=captions_html[0],  # 完全恢复原始写法，保证稳定性
                 parse_mode="html",
                 link_preview=False,
                 reply_to=reply_to,
@@ -376,8 +340,9 @@ async def safe_send_album(*, target, files, captions_html, reply_to=None):
             log(f"❌ 相册转发失败，第{retry_count}次重试 | 详情：{str(e)}")
             await asyncio.sleep(3)
     
-    return sent_msg
-
+    if send_success:
+        return await client.get_messages(target, limit=1)
+    return None
 async def message_handler(event):
     try:
         if event.grouped_id:
@@ -434,6 +399,7 @@ async def message_handler(event):
         )
         
         if sent_msg:
+            sent_msg = sent_msg[0]
             await save_message_mapping(
                 source_channel_id=source_channel_id,
                 source_msg_id=msg.id,
@@ -445,60 +411,19 @@ async def message_handler(event):
             log(f"转发成功: 单条消息 | 原消息ID: {msg.id} | 目标消息ID: {sent_msg.id}" + (f" | 回复目标ID: {reply_to_target_id}" if reply_to_target_id else ""))
     except Exception as e:
         log(f"消息处理错误: {e}")
-
-# ========== 修复：重写相册事件处理逻辑（解决消息不完整问题）==========
+# ========== 完全恢复原始相册事件处理逻辑 ==========
 async def album_handler(event):
     try:
-        # 缩短初始等待，改为动态重试获取完整消息
-        await asyncio.sleep(2)
-        
-        # ========== 核心修复：通过grouped_id重新获取完整相册 ==========
-        grouped_id = event.grouped_id
+        await asyncio.sleep(5)
+        msgs = event.messages
+        sorted_msgs = sorted(msgs, key=lambda m: m.id)
         source_channel_id = event.chat_id
-        all_msgs = []
-        
-        # 重试3次获取完整相册，解决Telethon分批次触发事件的问题
-        for retry in range(3):
-            try:
-                # 获取最近100条消息，筛选相同grouped_id的所有消息
-                recent_msgs = await client.get_messages(source_channel_id, limit=100)
-                all_msgs = [m for m in recent_msgs if m.grouped_id == grouped_id]
-                
-                if len(all_msgs) > 0:
-                    log(f"✅ 第{retry+1}次获取成功，完整相册共{len(all_msgs)}条消息 | grouped_id={grouped_id}")
-                    break
-                    
-                log(f"⚠️  第{retry+1}次获取相册为空，等待2秒后重试")
-                await asyncio.sleep(2)
-            except Exception as e:
-                log(f"❌ 第{retry+1}次获取相册失败: {e}")
-                await asyncio.sleep(2)
-        
-        # 兜底：如果3次都失败，使用事件自带的消息列表
-        if len(all_msgs) == 0:
-            log("⚠️  无法获取完整相册，使用事件自带消息列表")
-            all_msgs = event.messages
-        
-        # 按消息ID严格排序，确保与原相册顺序一致
-        sorted_msgs = sorted(all_msgs, key=lambda m: m.id)
-        
-        # ========== 新增：预加载所有消息的完整内容 ==========
-        # 解决部分消息文本和实体未完全下载的问题
-        for i in range(len(sorted_msgs)):
-            try:
-                full_msg = await client.get_messages(source_channel_id, ids=sorted_msgs[i].id)
-                if full_msg:
-                    sorted_msgs[i] = full_msg
-            except Exception as e:
-                log(f"⚠️  预加载消息{sorted_msgs[i].id}失败: {e}")
-        
-        # 以下保持原有逻辑不变
         target_entity = CHANNEL_MAP.get(source_channel_id)
         if not target_entity:
             log(f"拦截: 未找到该频道的目标映射 | 频道ID: {source_channel_id}")
             return
         
-        if any(is_forwarded_msg(m) for m in sorted_msgs):
+        if any(is_forwarded_msg(m) for m in msgs):
             log("拦截: 其他地方转发的相册消息")
             return
         
@@ -508,10 +433,9 @@ async def album_handler(event):
             log(f"⏭️  已跳过 | 原首条消息ID: {first.id} | 同一条相册已转发")
             return
         
-        btn_count = sum(count_buttons(m) for m in sorted_msgs)
-        # 调用修复后的文本提取函数
-        text, entities = pick_caption_from_album(sorted_msgs)
-        log(f"收到相册 | 原相册媒体数:{len(sorted_msgs)} | 最终提取文本长度:{len(text)} | 按钮:{btn_count}")
+        btn_count = sum(count_buttons(m) for m in msgs)
+        text, entities = pick_caption_from_album(event, sorted_msgs)
+        log(f"收到相册 | 原相册媒体数:{len(msgs)} | 最终提取文本长度:{len(text)} | 按钮:{btn_count}")
         if has_paid_ad(text):
             log("拦截: 含付费广告")
             return
@@ -559,6 +483,7 @@ async def album_handler(event):
         )
         
         if sent_msg:
+            sent_msg = sent_msg[0]
             await save_message_mapping(
                 source_channel_id=source_channel_id,
                 source_msg_id=first.id,
@@ -570,7 +495,6 @@ async def album_handler(event):
             log(f"转发成功: 相册 | 原首条消息ID: {first.id} | 目标消息ID: {sent_msg.id}" + (f" | 回复目标ID: {reply_to_target_id}" if reply_to_target_id else ""))
     except Exception as e:
         log(f"相册处理错误: {e}")
-
 async def edit_handler(event):
     try:
         msg = event.message
@@ -582,7 +506,6 @@ async def edit_handler(event):
             return
     except Exception as e:
         log(f"编辑事件处理错误: {e}")
-
 # ========== 定时重启 ==========
 async def auto_restart():
     while True:
@@ -592,7 +515,6 @@ async def auto_restart():
         log(f"⏰ 到达定时重启时间（{RESTART_TIME//3600}小时），准备优雅重启...")
         stop_event.set()
         break
-
 async def resolve_and_bind():
     global CHANNEL_MAP, SOURCE_ENTITY_CACHE
     config_map = await load_channel_config()
@@ -622,7 +544,6 @@ async def resolve_and_bind():
     client.add_event_handler(album_handler, events.Album(chats=source_chats))
     client.add_event_handler(message_handler, events.NewMessage(chats=source_chats))
     client.add_event_handler(edit_handler, events.MessageEdited(chats=source_chats))
-
 async def main():
     if not DATABASE_URL:
         raise ValueError("请在Railway环境变量中配置DATABASE_URL")
@@ -638,7 +559,6 @@ async def main():
     track_task(restart_task)
     
     await client.run_until_disconnected()
-
 if __name__ == "__main__":
     try:
         log("🚀 程序启动中，开启内置进程自重启模式...")
