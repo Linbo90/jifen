@@ -270,6 +270,22 @@ def pick_caption_from_album(event):
     log(f"相册首条消息ID:{first.id} | 提取到的文本长度:{len(text)}")
     return text, list(entities or [])
 
+async def collect_full_album(chat_id, grouped_id, seed_msgs):
+    ids = [m.id for m in seed_msgs]
+    min_id = max(0, min(ids) - 8)
+    max_id = max(ids) + 8
+
+    window = await client.get_messages(chat_id, limit=30, min_id=min_id, max_id=max_id)
+    if not isinstance(window, list):
+        window = [window] if window else []
+
+    merged = {}
+    for m in list(seed_msgs) + window:
+        if getattr(m, "grouped_id", None) == grouped_id and getattr(m, "media", None):
+            merged[m.id] = m
+
+    return [merged[k] for k in sorted(merged)]
+
 def to_html(text: str, entities):
     if not text:
         return ""
@@ -417,74 +433,77 @@ async def message_handler(event):
 
 async def album_handler(event):
     try:
-        await asyncio.sleep(5)
         msgs = event.messages
-        sorted_msgs = sorted(msgs, key=lambda m: m.id)
         source_channel_id = event.chat_id
+        grouped_id = getattr(event, "grouped_id", None)
+        sorted_msgs = sorted(msgs, key=lambda m: m.id)
+
+        if grouped_id and sorted_msgs:
+            full_msgs = await collect_full_album(source_channel_id, grouped_id, sorted_msgs)
+            if len(full_msgs) > len(sorted_msgs):
+                log(f"相册补齐: 原始{len(sorted_msgs)}条 -> 补齐后{len(full_msgs)}条")
+                sorted_msgs = full_msgs
+                msgs = full_msgs
+
         target_entity = CHANNEL_MAP.get(source_channel_id)
         if not target_entity:
             log(f"拦截: 未找到该频道的目标映射 | 频道ID: {source_channel_id}")
             return
-        
+
         if any(is_forwarded_msg(m) for m in msgs):
             log("拦截: 其他地方转发的相册消息")
             return
-        
+
         first = sorted_msgs[0]
-        # 新增：同步11.py的重复转发检查
         if (source_channel_id, first.id) in processed_msg_ids:
             log(f"⏭️  已跳过 | 原首条消息ID: {first.id} | 同一条相册已转发")
             return
-        
+
         btn_count = sum(count_buttons(m) for m in msgs)
         text, entities = pick_caption_from_album(event)
         log(f"收到相册 | 原相册媒体数:{len(msgs)} | 最终提取文本长度:{len(text)} | 按钮:{btn_count}")
+
         if has_paid_ad(text):
             log("拦截: 含付费广告")
             return
         if btn_count >= 1:
             log(f"拦截: 相册检测到按钮（总数量:{btn_count}），全部禁止")
             return
-        # 全文本违规检查：只要有任何@/链接，直接拦截，不做任何截断
         if has_link(text):
             log(f"拦截: 相册全文本包含违规内容（@/链接）| 原首条消息ID: {first.id}")
             return
-        # 无违规，直接使用原文本和原始格式，不做任何修改
-        new_text, new_entities = text, entities
-        first_caption_html = to_html(new_text, new_entities)
-        
-        # 统一使用排序后的消息列表，确保媒体顺序与原相册一致
+
+        first_caption_html = to_html(text, entities)
+
         valid_media_list = []
         for m in sorted_msgs:
-            # 兼容1.42.0：明确判断有效媒体类型，过滤MediaEmpty等无效对象
             if hasattr(m, 'media') and m.media:
                 if hasattr(m.media, 'photo') and m.media.photo:
                     valid_media_list.append(m.media)
                 elif hasattr(m.media, 'document') and m.media.document:
                     valid_media_list.append(m.media)
-        
+
         if len(valid_media_list) == 0:
             log("拦截: 相册无有效媒体文件")
             return
-        
+
         valid_captions_list = [first_caption_html] + [""] * (len(valid_media_list) - 1)
         log(f"相册有效媒体数:{len(valid_media_list)} | 已完成长度匹配，保证相册不拆分")
-        
+
         reply_to_target_id = get_reply_target_id(source_channel_id, first)
         if first.reply_to and not reply_to_target_id and not ALLOW_REPLY_WITHOUT_MAPPING:
             log(f"拦截: 回复相册未找到原消息映射 | 首条消息ID: {first.id} | 回复的原消息ID: {first.reply_to.reply_to_msg_id}")
             return
-        
-        # 新增：同步11.py的转发间隔控制
+
         await rate_limit_wait()
-        
+
         sent_msg = await safe_send_album(
             target=target_entity,
             files=valid_media_list,
             captions_html=valid_captions_list,
             reply_to=reply_to_target_id
         )
-        
+
         if sent_msg:
             sent_msg = sent_msg[0]
             await save_message_mapping(
@@ -493,9 +512,9 @@ async def album_handler(event):
                 target_channel_id=target_entity.id,
                 target_msg_id=sent_msg.id
             )
-            # 新增：同步11.py的已处理消息缓存
             processed_msg_ids.append((source_channel_id, first.id))
             log(f"转发成功: 相册 | 原首条消息ID: {first.id} | 目标消息ID: {sent_msg.id}" + (f" | 回复目标ID: {reply_to_target_id}" if reply_to_target_id else ""))
+
     except Exception as e:
         log(f"相册处理错误: {e}")
 
